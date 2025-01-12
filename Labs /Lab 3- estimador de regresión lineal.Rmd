@@ -1,0 +1,315 @@
+---
+title: "estimador de regresión"
+author: "Muestreo II"
+date: "8/29/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Paquetes
+```{r,warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(sampling)
+```
+
+### Universo/Elegibles
+```{r}
+(U=readxl::read_xlsx(here("Labs ","frame empresas.xlsx")))
+```
+El marco muestral está conformado por las empresas que tienen 20 empleados ($x$) o más. La cantidad de empresas de $U$ es $N=`r nrow(U)`$ y el objetivo es estimar el total de las remuneraciones ($y$), $Y=\sum\nolimits_{i\in U}y_i=`r sum(U$rem)`$
+
+
+### Introducción
+
+En un principio el modelo $m$ que asiste al estimador de regresión $\hat Y^{\text{GREG}}$ es un modelo simple: $m(x)=\beta_0+\beta_1 x$.
+
+Utilizamos dos estrategias de selección (diseños muestrales):
+
+ * Muestreo aleatorio simple de tamaño $n=200$
+ 
+ * Muestreo PPS de tamaño $n=200$ utilizando como medida de tamaño (MOS) la cantidad de empleados de la empresa.
+
+
+### muestra aleatorio simple  
+
+Seleccionamos una muestra  bajo un m.a.s. de tamaño $n=200$
+
+```{r}
+(s = U %>% slice_sample(n=200, 
+                       replace = FALSE) %>% 
+          mutate(bw=nrow(U)/n())) # ponderadores w iguales para todos 
+```
+
+Posteriomente, visualizamos la relación entre la variable auxiliar (empleados) y la variable de interés (rem)
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(s, aes(x=empleados, y=rem))+
+            geom_point(color='blue', alpha=0.4)+ geom_smooth(method='lm',se=FALSE)+
+            theme_bw()
+```
+
+Luego, estimamos el modelo $\hat m(x)= \hat B_0 +\hat B_1 x$ utilizando únicamente los datos de la muestra aletoria $s$ 
+
+```{r}
+modelo_est= s %>% lm(rem~empleados,
+                     weights=bw, 
+                     data=.)
+```
+$\hat{Y} = \sum_{i \in U} \hat{m}(x_i) + \sum w_iy_i - \hat{m}(xi)$
+
+
+```{r}
+modelo_est %>% summary()
+```
+
+Una vez estimado el modelo, procedemos a realizar las predicciones de la variable $y$ para todos los individuos de la población $U$
+```{r}
+y_est = U %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+```
+
+Computamos el total $\sum\limits_{i\in U}\hat m(\mathbf{x}_i)$
+
+
+```{r}
+(tot_est_y= sum(y_est))
+```
+Como los ponderadores son iguales (w) el error va a dar 0 (bajo un MAS)
+
+
+El término de ajuste bajo un diseño simple es cero, por lo tanto, el estimador de regresión queda definido como:
+
+$$\hat Y^{\text{REG}} =\sum\limits_{i\in U}\hat m(\mathbf{x}_i)$$
+```{r}
+(Y_GREG= sum(y_est))
+
+```
+
+Otra forma es utilizando únicamente los totales poblaciones de las variables auxiliares 
+N totales pob
+X 
+del modelo me quedo con los parametros Beta 1 y 0 
+$X^{T} \hat{B}$
+
+```{r}
+N=nrow(U)
+X=U %>% pull(empleados) %>% sum()
+B_EST= modelo_est %>% coefficients() %>% as.vector()
+(B_EST[1]*N + B_EST[2]*X)
+```
+
+
+Calculamos la estimación de la varianza del estimador de regresión
+
+$$\widehat{\text{var}}(\hat Y^{\text{REG}})= N^2(fpc)\text{var}[e]/n $$
+```{r}
+N=nrow(U) #FILAS POB
+n=nrow(s)# FILA MUESTRAL
+errores= modelo_est %>% residuals(.) # RESIDUOS 
+(var_est_Y_GREG = (N**2*(1-n/N)*var(errores)/n)) 
+```
+
+Estimación de la varianza del estimador HT bajo un m.a.s.
+
+```{r}
+(var_est_Y_HT = (N**2*(1-n/N)*var(s %>% pull(rem))/n))
+```
+
+Finalmente, computamos el efecto de diseño estimado
+```{r}
+(DEFF_EST=var_est_Y_GREG /var_est_Y_HT)
+```
+El disenio HT es mas eficiente 
+
+importante: bajo un m.a.s y  un modelo de regresion lineal simple $V\hat{Y}^{Gre} prop  V^{HT} (1-R^2)$
+
+### Distribución empirica del estimador de regresión bajo un m.a.s.
+
+Simulamos 1000 muestras (replicas) y observamos propiedades: esperenza, varianza o spread y normalidad.
+
+
+```{r}
+Y_GREG_SIM = as.numeric()
+Y_HT_SIM = as.numeric()
+
+R=1000
+for (i in 1:R){
+
+  s = U %>% slice_sample(n=n, 
+                       replace = FALSE) %>% 
+          mutate(bw=N/n)
+
+modelo_est = s %>% lm(rem~empleados,
+         weights=bw,
+         data=.)  
+  
+Y_GREG_SIM[i] = U %>% select(empleados) %>% 
+                      predict.lm(modelo_est, 
+                                newdata = .) %>% sum()
+Y_HT_SIM[i]= s %>% pull(rem) %>% mean() * N
+
+}
+
+```
+
+### Resultados
+
+```{r}
+data_sim = tibble(TIPO='HT',ESTIMADOR=Y_HT_SIM) %>% 
+            bind_rows(tibble(TIPO='Y_GREG', ESTIMADOR=Y_GREG_SIM))
+
+u %>%  summarise(cor(rem,empleados)^2)
+```
+
+
+```{r}
+data_sim %>% group_by(TIPO) %>% 
+  summarise(PROMEDIO=mean(ESTIMADOR),
+            VAR=var(ESTIMADOR),
+            SD=sd(ESTIMADOR))
+```
+
+Visualizamos
+
+```{r}
+data_sim %>% ggplot()+ 
+  geom_density(aes(x=ESTIMADOR, 
+                   fill=as_factor(TIPO)),
+               alpha=0.2) +
+  theme_bw()
+```
+ el gre esta bastante concentrado 
+
+### Idem bajo un PPS
+
+el pps anda bien porque hay una correlacion fuerte en #empleados y remuneraciones 
+
+
+Seleccionamos la muestra y computamos los ponderadores originales
+
+```{r}
+U= U %>% mutate(estrato=1) # estrato fantasma para que funcione strata 
+s= sampling::strata(U,
+                    stratanames = 'estrato',
+                    method='systematic',
+                    size=n,
+                    pik=U$empleados)
+U
+s= sampling::getdata(U,s) %>% mutate(bw=1/Prob)
+```
+
+corroboramos que estime sin error el total de empleados y "vemos" como estima el tamaño de la población $N$
+
+```{r}
+s %>% summarise(tot_emp_est=sum(empleados*bw),
+                N_est=sum(bw)) # estimación
+```
+
+```{r}
+U %>% summarise(tot_emp=sum(empleados),
+                N=n()) # verdadero
+
+```
+No estima sin error el total de la población. Sería bueno que continuara estimando sin error el total de empleados y también el tamaño de la población $N$. Utilizamos el estimador de regresión, el cual, en este caso, tiene un término de ajuste.
+
+
+
+Estimamos el modelo $\hat m(x)= \hat B_0 +\hat B_1 x$ utilizando únicamente los datos de la muestra aleatoria $s$ 
+
+```{r}
+modelo_est= s %>% lm(rem~empleados,
+                     weights=bw, 
+                     data=.)
+```
+
+```{r}
+modelo_est %>% summary()
+```
+
+Una vez estimado el modelo, procedemos a realizar las predicciones de la variable $y$ para todos los individuos de la población $U$
+```{r}
+y_est = U %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+```
+
+Computamos el total $\sum\limits_{i\in U}\hat m(\mathbf{x}_i)$
+
+
+```{r}
+(tot_est_y= sum(y_est))
+```
+
+El estimador de regresión queda definido como:
+
+$$\hat Y^{\text{REG}} =\sum\limits_{i\in U}\hat m(\mathbf{x}_i) +\sum\limits_{i\in s}w_i(y_i-\hat m(x_i))$$
+```{r}
+tot_est_y + sum(modelo_est %>% residuals() * s %>% pull(bw) )
+```
+
+
+### Distribución empirica del estimador de regresión bajo un PPS
+
+Simulamos 1000 muestras (replicas) y observamos propiedades: esperenza, varianza o spread y normalidad.
+
+
+```{r}
+Y_GREG_SIM = as.numeric()
+Y_HT_SIM = as.numeric()
+
+R=1000
+for (i in 1:R){
+  
+
+s= sampling::strata(U,
+                    stratanames = 'estrato',
+                    method='systematic',
+                    size=n,
+                    pik=U$empleados)
+s= sampling::getdata(U,s) %>% mutate(bw=1/Prob)
+
+modelo_est = s %>% lm(rem~empleados,
+         weights=bw,
+         data=.)  
+  
+Y_GREG_SIM[i] = U %>% select(empleados) %>% 
+                      predict.lm(modelo_est, 
+                                newdata = .) %>% sum() +
+               sum(modelo_est %>% residuals() * s %>% pull(bw) )
+Y_HT_SIM[i]= s %>% summarise(sum(bw*rem)) %>% pull()
+
+}
+
+```
+
+### Resultados
+
+```{r}
+data_sim = tibble(TIPO='HT',ESTIMADOR=Y_HT_SIM) %>% 
+            bind_rows(tibble(TIPO='Y_GREG', ESTIMADOR=Y_GREG_SIM))
+```
+
+
+```{r}
+data_sim %>% group_by(TIPO) %>% 
+  summarise(PROMEDIO=mean(ESTIMADOR),
+            VAR=var(ESTIMADOR),
+            SD=sd(ESTIMADOR))
+```
+
+Visualizamos
+
+```{r}
+data_sim %>% ggplot()+ 
+  geom_density(aes(x=ESTIMADOR, 
+                   fill=as_factor(TIPO)),
+               alpha=0.2) +
+  theme_bw()
+```
+
+

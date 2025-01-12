@@ -1,0 +1,350 @@
+---
+title: "Laboratorio 6 - Calibracion truncada"
+author: "Matias Bajac"
+date: '2024-12-30'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(survey) 
+
+U = read_csv('frame.csv')
+```
+
+ 
+#----------------------------------------------------------------
+# VARIABLES DE CONTROL
+# educacion
+# edad
+# sexo
+# estrato
+# salud
+# pobreza
+#----------------------------------------------------------------
+
+# raking y lineal
+
+# seleccionamos una muestra m?s peque?a (n=500)
+
+#----------------------------------------------------------------
+# crea tramos de educaci?n
+
+```{r}
+U = U %>% mutate(PS_educ=cut(educ,
+                               breaks=c(0,6,9,12,15,18,Inf),
+                               right=FALSE),
+                 PS_edad=cut(edad, 
+                               breaks=c(14,20,25,30,40,50,60,Inf), 
+                               right=FALSE),
+                 salud=factor(salud),
+                 sexo=factor(sexo), 
+                 estrato=factor(estrato),
+                 pobre=factor(pobre))
+```
+
+
+# computa conteos poblacionales 
+
+# conteos poblacionales PS.EDUC
+```{r}
+(pop_educ= U %>% count(PS_educ))
+```
+
+# conteos poblacionales PS.edad
+```{r}
+(pop_edad= U %>% count(PS_edad))
+```
+
+
+# conteos poblacionales sexo
+```{r}
+(pop_sexo=U %>% count(sexo))
+
+```
+
+# conteos poblacionales salud
+```{r}
+(pop_salud=U %>% count(salud))
+
+```
+
+# conteos poblacionales  estrato
+```{r}
+(pop_estrato=U %>% count(estrato))
+```
+
+
+# conteos poblacionales  pobreza
+```{r}
+(pop_pobre=U %>% count(pobre))
+```
+
+
+#----------------------------------------------------------------
+
+# seleciona una muestra SI de n=1500
+```{r}
+set.seed(12345)
+N=nrow(U) 
+n=500
+```
+
+
+#PERSONAS SELECCIONADAS (LAS ETIQUETAS)
+```{r}
+incluidas=sample(1:N,           #ETIQUETAS
+                 size=n,        # TAMA?O DE MUESTRA
+                 replace=FALSE) # SIN REMPLAZO
+```
+
+
+# extrae del marco las seleccionadas
+```{r}
+muestra=U %>% slice(incluidas)
+
+```
+
+
+# calcula tasa de muestreo y ponderadores base
+```{r}
+muestra = muestra %>% mutate(f=n/N, w=1/f)
+```
+
+
+
+#----------------------------------------------------------------
+
+# carga el diseño
+
+```{r}
+(p=svydesign(id=~0,       #NO CLUSTER
+             strata=NULL, #NO ESTRATOS
+             fpc=~f,      #TASA DE MUESTREO
+             weights=~w,  #PONDERADORES BASE
+             data=muestra))
+```
+
+#----------------------------------------------------------------
+
+# ecuacion de calibracion
+```{r}
+CONTEOS=c(N,
+          pop_educ$n[-1],
+          pop_sexo$n[-1],
+          pop_edad$n[-1],
+          pop_salud$n[-1],
+          pop_estrato$n[-1],
+          pop_pobre$n[-1])
+```
+
+
+#----------------------------------------------------------------
+```{r}
+r=calibrate(design=p,
+              formula=~PS_educ+sexo+PS_edad+
+                salud+estrato+pobre,
+              population=CONTEOS,
+              calfun="raking")
+```
+
+#----------------------------------------------------------------
+```{r}
+summary(weights(r))
+
+```
+
+
+#----------------------------------------------------------------
+# calibrado con funcion lineal
+
+```{r}
+l=calibrate(design=p,
+            formula=~PS_educ+sexo+PS_edad+
+              salud+estrato+pobre,
+            population=CONTEOS,
+            calfun="linear")
+
+summary(weights(l))
+```
+
+#----------------------------------------------------------------
+
+```{r}
+aux = tibble(w_raking=weights(r), w_lineal=weights(l))
+ggplot (aux, aes(x=w_raking, y=w_lineal))+geom_point(alpha=0.4, color='blue')
+```
+
+
+
+#----------------------------------------------------------------
+#mismos resultados 
+
+```{r}
+svymean(~ingreso,r)
+svymean(~ingreso,l)
+```
+ 
+#----------------------------------------------------------------
+
+#distribucion de los ajustes
+
+```{r}
+aux = aux %>% mutate(bw=weights(p), g=w_raking/bw)
+ggplot (aux, aes(x=g))+geom_histogram(alpha=0.4, fill='blue', color='white')
+
+
+summary(weights(r)/weights(p))
+```
+
+
+#----------------------------------------------------------------
+# seteamos los limites Limite L=0.7 y U=1.4
+
+```{r}
+rtrunc=calibrate(design=p,
+            formula=~PS_educ+sexo+PS_edad+
+              salud+estrato+pobre,
+            population=CONTEOS,
+            calfun="raking",
+            bounds = c(0.7, 1.4))
+```
+
+#----------------------------------------------------------------
+# exigimos mas
+# seteamos los limites Limite L=0.8 y U=1.3
+
+```{r}
+rtrunc=calibrate(design=p,
+                 formula=~PS_educ+sexo+PS_edad+
+                   salud+estrato+pobre,
+                 population=CONTEOS,
+                 calfun="raking",
+                 bounds = c(0.8, 1.3))
+```
+
+
+#----------------------------------------------------------------
+#exigimos mas
+# seteamos los limites Limite L=0.8 y U=1.2
+
+
+#rtrunc=calibrate(design=p,
+#                 formula=~PS.educ+sexo+PS.edad+
+#                   salud+estrato+pobre,
+#                 population=CONTEOS,
+#                 calfun="raking",
+#                 bounds = c(0.8, 1.2))
+#----------------------------------------------------------------
+#aumentamos el n?mero de iteraciones
+#rtrunc=calibrate(design=p,
+#                 formula=~PS.educ+sexo+PS.edad+
+#                   salud+estrato+pobre,
+#                 population=CONTEOS,
+#                 calfun="raking",
+#                 bounds = c(0.8, 1.2),
+#                 maxit=500)
+#----------------------------------------------------------------
+# tolerancia
+
+#rtrunc=calibrate(design=p,
+#                 formula=~PS.educ+sexo+PS.edad+
+#                   salud+estrato+pobre,
+#                 population=CONTEOS,
+#                  calfun="raking",
+#                 bounds = c(0.8, 1.2),
+#                 maxit=500,
+#                 epsilon=1e-6)
+#----------------------------------------------------------------
+# pedimos que arroje resultado
+```{r}
+rtrunc=calibrate(design=p,
+                 formula=~PS_educ+sexo+PS_edad+
+                   salud+estrato+pobre,
+                 population=CONTEOS,
+                 calfun="raking",
+                 bounds =  c(0.8, 1.2),
+                 maxit=500,
+                 epsilon=1e-6,
+                 force=TRUE)
+```
+
+#----------------------------------------------------------------
+# vemos la distribuci0n
+
+```{r}
+aux = aux %>% mutate(g_trunc=weights(rtrunc)/bw)
+ggplot (aux, aes(x=g_trunc))+geom_histogram(alpha=0.4, fill='blue', color='white')
+```
+
+
+
+#----------------------------------------------------------------
+# comparamos raking con raking truncado
+```{r}
+plot(weights(r),weights(rtrunc),
+     xlab='w raking',
+     ylab='w raking truncado',
+     col='royalblue4',
+     pch=21,
+     cex=1.2,
+     bg='tomato3')
+```
+
+#----------------------------------------------------------------
+# chequeamos las ecuaciones de calibraci?n
+
+```{r}
+#EDUCACION
+cbind(est=round(svytable(~PS_educ,rtrunc)), conteo=pop_educ$n)
+#SEXO
+cbind(est=round(svytable(~sexo,rtrunc)), conteo=pop_sexo$n)
+#EDAD
+cbind(est=round(svytable(~PS_edad,rtrunc)), conteo=pop_edad$n)
+#SALUD
+cbind(est=round(svytable(~salud,rtrunc)), conteo=pop_salud$n)
+#estrato
+cbind(est=round(svytable(~estrato,rtrunc)), conteo=pop_estrato$n)
+#pobreza
+cbind(est=round(svytable(~pobre,rtrunc)), conteo=pop_pobre$n)
+
+```
+
+
+
+# logit (basiscamente lo mismo)
+# importa las variables de control
+
+```{r}
+logit=calibrate(design=p,
+                 formula=~PS_educ+sexo+PS_edad+
+                   salud+estrato+pobre,
+                 population=CONTEOS,
+                 calfun="logit",
+                 bounds = c(0.8, 1.2),
+                 maxit=500,
+                 epsilon=1e-6,
+                 force=TRUE)
+
+
+svymean(~ingreso,logit)
+svymean(~ingreso,rtrunc)
+
+```
+
+
+# comparamos raking con logit
+```{r}
+plot(weights(rtrunc),weights(logit),
+     xlab='w raking',
+     ylab='w rlogit',
+     col='royalblue4',
+     pch=21,
+     cex=1.2,
+     bg='tomato3')
+```
+
+

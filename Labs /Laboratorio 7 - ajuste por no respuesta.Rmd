@@ -1,0 +1,411 @@
+---
+title: "Ajustes por No Respuesta"
+author: "Muestreo II"
+date: "10/31/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## carga paquetes
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(PracTools)
+library(rpart.plot)
+library(survey)
+library(readxl)
+library(srvyr)
+choose(2,2)
+
+matrx(cnrow=3)
+```
+
+
+c
+
+# cargamos los datos
+
+```{r, warning=FALSE, message=FALSE}
+s = readxl::read_xlsx('muestra_nr_ajustada.xlsx')
+```
+
+Pasamos a factor algunas variables
+
+```{r}
+s  = s %>% mutate(estrato=factor(estrato),
+                  upm=factor(upm),
+                  sexo=factor(sexo),
+                  nivel_educativo=factor(nivel_educativo)
+                  )
+```
+
+### descripción de las variables
+
+ * las variables `estrato` y `upm` pertenecen al marco muestral
+ * `ingreso_actual` es la variable relevada ($y$) en $s$ y solo es conocida para los respondentes (i.e. `R=1`)
+ * `base_weights` son los ponderadores provenientes del diseño muestral
+ * `sexo, edad, nivel_educativo, ingreso anterior` son conocidas para todos los hogares de $s$ y provienen de encuestas anteriores, es decir, no se encuentra incluida en el marco muestral
+ 
+## Objetivo
+
+Vemos distintas formas de estimar las propensiones de responder $\hat \phi_i$, ya sea, utilizando unicamente información del marco muestral (creando clases/post-estratos de NR) y utilizando información de encuestas anteriores (e.g. edad, sexo, educación e ingreso) por medio de algortimos más "complejos" (e.g. logit, árboles y randomforest). 
+
+Posteriomente, hacemos ajuste por propensiones simples y/o propensiones agrupadas/estratificadas.
+
+## tasa de respuesta
+
+Como primer paso vemos la tasa de respuesta a nivel global
+
+```{r}
+s %>% count(R) %>% mutate(prop=n/sum(n))
+```
+
+
+
+## uso de la información auxiliar del marco muestral
+
+Utilizando información del marco muestral podemos hacer clases o post estratos de NR utiliando ya sea, los estratos o las UPM. La idea es crear clases de NR que presenten tasas de respuesta (TR) distintas, lo cual, nos puede indicar que la perterncia o no a determinada clase hace más o menos propenso a una unidad a responder. Bajo este enfoque, se asume que las unidades (personas) tiene la misma propensión de responder $\phi$ y la misma es estimada computando la tasa de respuesta. 
+
+Es importante tener en cuenta que para el computo de la TR podemos tener en cuenta los ponderadores o no. 
+
+
+**Creamos clases de NR, por ejemplo a nivel de estrato**
+
+```{r}
+ajuste_nr_estrato=s %>% group_by(estrato) %>% summarise(tr=mean(as.numeric(R)),
+                                      tr_w=weighted.mean(as.numeric(R),base_weights))
+```
+
+Pegamos las tasas de respuestas ponderadas en la base y computamos un ponderador ajustado por no respuesta
+
+```{r}
+s=left_join(s,select(ajuste_nr_estrato, estrato, tr_w)) %>%
+                mutate(w_nr_post=base_weights/tr_w)  
+```
+
+Visualizamos los ponderadores ajustados por no respuesta vs los originales
+
+```{r}
+ggplot(s, aes(x=base_weights,y=w_nr_post, color=estrato)) + geom_point()
+```
+
+Computamos la estimación del ingreso actual utilizando los ponderadores originales (sin ajustar) y utilziando los ajustados por no respuesta
+
+```{r}
+# media con ponderadores sin ajustar
+s %>% filter(R==1 ) %>%
+  summarise(sum(ingreso_actual*base_weights)/sum(base_weights)) %>% pull()
+
+```
+
+```{r}
+# media con ponderadores ajustados por no respuesta
+s %>% filter(R==1 ) %>%
+  summarise(sum(ingreso_actual*w_nr_post)/sum(w_nr_post)) %>% pull()
+
+
+```
+
+
+
+## Estimación de las propensiones $\hat \phi$ por medio de algortimos
+
+
+En este caso para modelar las propensiones la variable dependiente/salida del modelo/algoritmo es una variable dummy o dicotomica (R). 
+
+Estimamos las propensiones utilizando tres algortimos distintos:
+
+* logit
+* arbol de decisión
+* random forest
+
+Luego, los ponderadores ajustados por no respuesta son computados utilizando las propensiones estimadas a nivel de unidad, es decir,
+
+$$w_i^{nr}=\frac{w_i}{\hat \phi_i} $$
+
+Como paso previo **debemos** pasar la variable como factor 
+
+
+```{r}
+s = s %>% mutate(R=factor(R))
+```
+
+
+
+
+
+### Propensiones estimadas utilizando un logit
+
+Utilizamos como variables de entrada o explicativas ($x$): estrato, sexo, edad, nivel educativo y el ingreso anterior.
+```{r}
+log_model= logistic_reg() %>% 
+           set_engine('glm') %>% 
+           fit(R~estrato+sexo+edad+nivel_educativo+sqrt(ingreso_anterior), 
+               data=s, family='binomial')
+log_model %>% tidy() 
+ 
+
+
+```
+
+Hacemos las predicciones de las propensiones
+
+```{r}
+pred_logit= tibble(predict(log_model,s,type='prob') ,
+                   predict(log_model,s) )
+```
+
+Vemos como predice nuestro algortimo
+
+```{r}
+conf_mat(data = bind_cols(select(s,R),select(pred_logit,.pred_class)), 
+         truth = R,
+         estimate = .pred_class)
+```
+
+agregamos las propensiones estimadas a la muestra
+
+```{r}
+pred_logit = pred_logit %>% rename(prop_logit=.pred_1)
+s = s %>% bind_cols(select(pred_logit,prop_logit))
+```
+
+vemos distribuciones de las propensiones
+
+```{r}
+s %>% ggplot(aes(x=prop_logit)) +geom_histogram(bins=nrow(s)**.5, fill='purple', color='white', alpha=0.6)+
+  theme_bw()
+```
+
+Vemos visualmente si hay alguna relación entre las propensiones estimadas y las variables utilizadas
+
+```{r}
+s  %>% ggplot(aes(x=prop_logit,y=ingreso_anterior))+geom_point()
+```
+
+
+```{r}
+s  %>% ggplot(aes(x=prop_logit,y=edad))+geom_point()
+```
+
+computamos los ponderadoes ajustados por no respuesta 
+$$w_i^{nr}=\pi_i^{-1}\times \hat \phi_{i}^{-1}$$
+
+```{r}
+s = s %>% mutate(w_nr_logit=ifelse(R==1,  base_weights/prop_logit,0))
+```
+
+```{r}
+s %>% filter(R==1) %>% ggplot(aes(x=base_weights,y=w_nr_logit))+geom_point()
+```
+
+
+```{r}
+s %>% filter(R==1) %>% ggplot(aes(x=base_weights,y=w_nr_logit))+geom_hex()
+```
+
+Computamos el ingreso promedio con los pesos originales y los ajustados por NR
+
+Recordar que con los pesos basados en el diseño (asumimos MCAR)
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=base_weights) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+
+estimación con los pesos ajustados por NR usando un logit
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=w_nr_logit) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+
+
+## Estimación de las propensiones por medio de un arbol de decisión
+
+Usamos la mismas variables
+```{r}
+tree_model = decision_tree() %>% 
+  set_engine('rpart') %>% 
+  set_mode("classification") %>% 
+  fit(R~estrato+sexo+edad+nivel_educativo+ingreso_anterior, 
+               data=s)
+tree_model
+```
+
+
+```{r}
+rpart.plot(tree_model$fit, roundint = FALSE)
+```
+
+
+Hacemos las predicciones de las propensiones
+
+```{r}
+pred_tree= tibble(predict(tree_model,s,type='prob') ,
+                   predict(tree_model,s) )
+```
+
+Vemos como predice nuestro algortimo
+
+```{r}
+conf_mat(data = bind_cols(select(s,R),select(pred_tree,.pred_class)), 
+         truth = R,
+         estimate = .pred_class)
+```
+
+
+agregamos las propensiones estimadas a la muestra
+
+```{r}
+pred_tree = pred_tree %>% rename(prop_tree=.pred_1)
+s = s %>% bind_cols(select(pred_tree,prop_tree))
+```
+
+vemos distribuciones de las propensiones
+
+```{r}
+s %>% ggplot(aes(x=prop_tree)) +geom_histogram(bins=nrow(s)**.5, fill='purple', color='white', alpha=0.6)+
+  theme_bw()
+```
+
+computamos los ponderadoes ajustados por no respuesta 
+$$w_i^{nr}=\pi_i^{-1}\times \hat \phi_{i}^{-1}$$
+
+```{r}
+s = s %>% mutate(w_nr_tree=ifelse(R==1,  base_weights/prop_tree,0))
+```
+
+```{r}
+s %>% filter(R==1) %>% ggplot(aes(x=base_weights,y=w_nr_tree))+geom_point()
+```
+
+estimación del ingreso promedio con los ponderadores originales
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=base_weights) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+computamos la estimacion del ingreso promedio con los ponderadores ajustados por NR
+
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=w_nr_tree) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+
+
+
+
+## Estimación de propensiones utilizando random forest
+
+Hacemos un random forest con 100 arboles
+```{r}
+
+rf_model= rand_forest( trees = 100) %>% 
+  set_engine('ranger') %>% 
+  set_mode('classification') %>% 
+  fit(R~estrato+sexo+edad+nivel_educativo+ingreso_anterior, 
+               data=s)
+rf_model
+
+```
+
+
+
+Hacemos las predicciones de las propensiones
+
+```{r}
+pred_rf= tibble(predict(rf_model,s,type='prob') ,
+                   predict(rf_model,s) )
+```
+
+Vemos como predice nuestro algortimo
+
+```{r}
+conf_mat(data = bind_cols(select(s,R),select(pred_rf,.pred_class)), 
+         truth = R,
+         estimate = .pred_class)
+```
+
+
+agregamos las propensiones estimadas a la muestra
+
+```{r}
+pred_rf = pred_rf %>% rename(prop_rf=.pred_1)
+s = s %>% bind_cols(select(pred_rf,prop_rf))
+```
+
+vemos distribuciones de las propensiones
+
+```{r}
+s %>% ggplot(aes(x=prop_rf)) +geom_histogram(bins=nrow(s)**.5, fill='purple', color='white', alpha=0.6)+
+  theme_bw()
+```
+
+computamos los ponderadoes ajustados por no respuesta 
+$$w_i^{nr}=\pi_i^{-1}\times \hat \phi_{i}^{-1}$$
+
+```{r}
+s = s %>% mutate(w_nr_rf=ifelse(R==1,  base_weights/prop_rf,0))
+```
+
+```{r}
+s %>% filter(R==1) %>% ggplot(aes(x=base_weights,y=w_nr_rf))+geom_point()
+```
+
+
+estimación del ingreso promedio con los ponderadores originales
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=base_weights) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+computamos la estimacion del ingreso promedio con los ponderadores ajustados por NR
+
+```{r}
+s %>% filter(R==1) %>% as_survey_design(id=upm, 
+                                        strata=estrato,
+                                        weights=w_nr_rf) %>% 
+              summarise(survey_mean(ingreso_actual, vartype = c('se','cv')))
+```
+
+## Ajuste utilizando propensiones estratificadas
+
+
+Creamos clases de NR en base a la distribuciones de las propensiones estimadas, e.g. las clases de NR corresponden a los quintiles. Luego, un ajuste único es realizado a nivel de cada una de las clases de NR. Dicho ajuste puede ser de variadas formas (e.g. media o mediana de las propensiones, tasas de respuesta, etc).
+
+La libreria `PracTools` realiza este tipo de estrategia por medio de la función `pclass`.
+
+Por ejemplo, ajustamos un logit y luego creamos 5 clases, i.e. computamos los quintiles
+
+```{r}
+clases_prop = out = pclass(formula = R~estrato+sexo+edad+nivel_educativo+ingreso_anterior,
+              data = s, type = "unwtd", link="logit", numcl=5) %>% as_tibble()
+clases_prop
+```
+
+```{r}
+count(clases_prop, p.class)
+```
+
+Por ejemplo, computamos un ajuste por no respuesta utilizando la mediana de las propensiones
+
+```{r}
+s= bind_cols(s, clases_prop) 
+s= s %>% group_by(p.class) %>% mutate(ajuste_nr_clases=1/median(propensities)) %>% ungroup()
+
+```
+

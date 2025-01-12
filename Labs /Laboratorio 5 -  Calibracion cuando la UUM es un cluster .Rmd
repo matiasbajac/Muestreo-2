@@ -1,0 +1,143 @@
+---
+title: "Laboratorio 5 - Calibracion cuando las UUM es un cluter"
+author: "Matias Bajac"
+date: '2024-12-30'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(survey) 
+library(sampling)
+library(tidyverse)
+```
+
+```{r}
+frame = read_csv('frame.csv')
+frame = frame %>% mutate(sexo=factor(sexo))
+frame = frame %>% mutate(PS_edad = cut(edad, #VARIABLE A RECODIFICAR
+                                       breaks=c(14,20,25,30,40,50,60,Inf), #CORTES
+                                       right=FALSE),# ABIERTOS POR LA DERECHA
+                         PS_educ= cut(educ,
+                                      breaks=c(0,6,9,12,15,18,Inf),
+                                      right=FALSE))
+
+```
+# conteos poblacionales
+```{r}
+pop_count_edad = frame %>% count(PS_edad) %>% rename(Freq=n)
+pop_count_edad
+
+pop_count_educ = frame %>% count(PS_educ) %>% rename(Freq=n)
+pop_count_educ
+
+pop_count_sexo = frame %>% count(sexo) %>% rename(Freq=n)
+pop_count_sexo
+```
+#cantidad de personas
+
+```{r}
+(N=nrow(frame))
+```
+#cantidad de hogares UPM
+```{r}
+M=frame %>% pull(idhog) %>% unique() %>% length()
+
+CONTEOS=c(N,
+          pop_count_educ$Freq[-1],
+         pop_count_sexo$Freq[-1],
+          pop_count_edad$Freq[-1])
+```
+
+
+#UPM=hogar
+#seleccionamos una muestra m=1000 bajo un SI
+
+#ordenamos U por el id hogar
+```{r}
+rame = frame %>% arrange(idhog)
+ 
+set.seed(12345)
+incluidas=sampling::cluster(frame,
+                            clustername='idhog',
+                            size=1000,
+                            method='srswor',
+                            description=TRUE)
+
+
+upm= sampling::getdata(frame,incluidas)
+
+upm %>% View()
+```
+
+
+#calcula ponderadores base
+```{r}
+upm = upm %>% mutate(bw=1/Prob)
+```
+
+
+#carga diseño
+```{r}
+p=svydesign(id=~idhog,   # ETIQUETAS UPM
+            strata=NULL, #NO ESTRATOS
+            fpc=~Prob,      #TASA DE MUESTREO
+            weights=~bw,  #PONDERADORES BASE
+            data=upm)
+
+```
+
+
+# raking por educ, edad y sexo (ponderadores distintos por UPM=hogar) 
+
+```{r}
+r=calibrate(design=p,
+            formula=~PS_educ+sexo+PS_edad,
+            population=CONTEOS,
+            calfun="raking")
+
+(est_r=svymean(~ingreso,r,deff=TRUE))
+cv(est_r)
+```
+
+
+
+# pedimos ponderadores iguales por hogar
+```{r}
+r_upm=calibrate(design=p,
+                formula=~PS_educ+sexo+PS_edad,
+                population=CONTEOS,
+                calfun="raking",
+                aggregate.stage=1)
+(est_upm=svymean(~ingreso,r_upm,deff=TRUE))
+cv(est_upm)
+```
+
+
+#pega los ponderadores a la base
+
+```{r}
+upm = upm %>% mutate(wr=weights(r),
+                     wupm=weights(r_upm))
+upm$wr=weights(r)
+upm$wupm=weights(r.upm)
+
+upm %>% select(idhog,wr,wupm) %>% head()
+```
+
+
+# scatterplot de los ponderadores
+
+```{r}
+ggplot(upm,aes(x=wr,y=wupm)) + geom_point()
+```
+
+
+
+
+
+
+

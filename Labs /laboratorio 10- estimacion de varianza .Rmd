@@ -1,0 +1,184 @@
+---
+title: "método del último conglomerado y remuestreo"
+author: "Muestreo II"
+date: "2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## paquetes
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(survey)
+library(srvyr)
+```
+
+## carga ECH
+
+```{r}
+ s =  haven::read_sav('P_2019_Terceros.sav')
+```
+
+Seleccionamos Montevideo, nos quedamos con algunas variables y creamos otras
+```{r}
+s = s %>% filter(dpto==1, mes<=3) %>% 
+  transmute(numero, 
+            nper,
+            sexo=e26,
+            edad=e27,
+            ingreso=PT1,
+            ocupado=case_when(pobpcoac==2 ~ 1, TRUE ~ 0),
+            desocupado=case_when(pobpcoac>=3 & pobpcoac<=5 ~ 1, TRUE ~ 0 ),
+            pet= case_when(edad>=14 ~ 1, TRUE ~ 0),
+            activo=ocupado+desocupado,
+            pobreza=pobre06,
+            w=pesoano)
+```
+
+
+Carga base de datos con los estratos y la UPM de la ECH
+```{r}
+info_design= haven::read_sav('ESTRATO_UPM_ECH2019.sav')
+```
+
+Le pegamos la información del diseño muestral a la muestra
+```{r, warning=FALSE, message=FALSE}
+s = s %>% left_join(info_design)
+```
+
+Posteriomente definimos el diseño muestral únicamente indicando los estratos y las UPM
+
+```{r}
+ps_uc = s %>% as_survey_design(id=upm_fic,
+                               strata=estrato,
+                               weights=w)
+```
+
+
+### Estimación de un total
+
+En una primera instancia estimamos el total de una variable $y$ cualquiera, en este, caso, estimamos el total de pobres 
+
+
+$$\hat Y = \sum\limits_{i \in s} w_i \times y_i $$
+
+```{r}
+ps_uc %>% summarise(est =survey_total(pobreza))
+```
+
+Corroboramos el cálculo 
+
+1. calcula estimaciones del total de pobreza a nivel de cada UPM
+```{r, warning=FALSE, message=FALSE}
+Yj = s %>% group_by(estrato,upm_fic) %>% summarise(Yj=sum(pobreza*w))
+Yj
+```
+
+2. calcula estimaciones del total de desempleados a nivel de estrato
+```{r}
+Yh= s %>% group_by(estrato) %>% summarise(Yh=sum(pobreza*w))
+Yh
+```
+
+3. calcula cantidad de UPM a nivel de estrato
+
+```{r}
+mh=s %>% group_by(estrato) %>% summarise(mh=sum(ifelse(duplicated(upm_fic)==FALSE,1,0)))
+mh 
+```
+
+Junta Yj,Yh y mh 
+```{r}
+aux = left_join(Yj,Yh,by='estrato')
+aux = left_join(aux,mh,by='estrato')
+```
+
+Luego, calcula suma cuadrados de las estimaciones de cada upm por mh respecto al estrato
+
+
+```{r}
+paso1=aux %>% group_by (estrato) %>% summarise(suma_h=sum((Yj*mh-Yh)**2))
+paso2=left_join(paso1,mh,by='estrato')
+```
+
+
+Finalmente, el SE coincide 
+
+```{r}
+sqrt(paso2 %>% summarise(est=sum(suma_h/(mh*(mh-1))))) 
+```
+
+## Réplicas y remuestreo
+
+
+### Jackknife
+
+Para utilizar diseños estratificados utilizamos `JKn`... puede ser computacionalmente intensivo
+```{r}
+ps_uc = svydesign(ids=~upm_fic,strata=~estrato, weights=~w, data=s)
+
+jkn=as.svrepdesign(design=ps_uc,type='JKn')
+```
+
+Calculamos la estimación y su SE del total de pobres
+
+```{r}
+svytotal(~pobreza,jkn)
+```
+
+Calculamos la tasa de empleo bajo ambos métodos (UC y JKN)
+
+```{r}
+# metodo UC
+svyratio(~ocupado, ~pet, ps_uc)
+```
+
+```{r}
+#metodo JKn
+svyratio(~ocupado, ~pet,jkn)
+```
+
+Podemos pedirle las estimaciones en cada una de las réplicas para ver la "forma" del estimador
+
+```{r}
+te=svyratio(~ocupado, ~pet,jkn,return.replicates=TRUE)
+```
+
+```{r}
+tibble(est= te$replicates) %>% ggplot()+ geom_histogram(aes(x=est), bins=20, fill='purple', color='white')+theme_light()
+```
+
+
+### Bootstrap
+
+
+```{r}
+boot=as.svrepdesign(design=ps_uc, type='subbootstrap', replicates=500)
+```
+
+Calculamos la tasa de empleo
+```{r}
+#metodo Boostrap
+svyratio(~ocupado, ~pet,jkn)
+```
+
+
+```{r}
+te_boot=svyratio(~ocupado, ~pet,boot,return.replicates=TRUE)
+```
+
+```{r}
+tibble(est= te_boot$replicates) %>% ggplot()+ geom_histogram(aes(x=est), bins=20, fill='purple', color='white')+theme_light()
+```
+
+
+
+
+
+

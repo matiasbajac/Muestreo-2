@@ -1,0 +1,260 @@
+---
+title: "estimador GREG en dominios"
+author: "Muestreo II"
+date: "8/29/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Paquetes
+```{r,warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(sampling)
+library(survey)
+```
+
+### Universo/Elegibles
+
+```{r}
+(U = readxl::read_xlsx('frame empresas.xlsx'))
+```
+
+El marco muestral está conformado por las empresas que tienen 20 empleados ($x$) o más. La cantidad de empresas de $U$ es $N=`r nrow(U)`$ y el objetivo es estimar el total de las remuneraciones ($y$) en las empresas de comercio (actividad G) 
+
+$$Y_d=\sum\limits_{i\in U_d}y_i=\sum\limits_{i\in U}y_{di}=48184$$
+
+Creamos una variable de pertenencia al dominio (`d`) y la variable extendida `y_d`
+```{r}
+U = U %>% mutate(d=ifelse(actividad=='G',1,0),
+                 y_d=d*rem) 
+
+## 1 si pertenece al dominio de interes, es decir a las empresas que son consideradas grandes 
+
+```
+
+
+
+### muestra aleatorio simple  
+
+Seleccionamos una muestra  bajo un m.a.s. de tamaño $n=500$
+
+```{r}
+set.seed(123456)
+(s = U %>% slice_sample(n=500, 
+                       replace = FALSE) %>% 
+          mutate(bw=nrow(U)/n()))
+
+s %>%  filter(actividad == "G") %>%  count()
+```
+
+## Estimador GREG directo
+
+En un principio el modelo que asiste al estimador de regresión $\hat Y_d^{\text{GREG}}$ es un modelo simple especifico del dominio $U_d$: $m_d(x)=\beta_{d0}+\beta_{d1} x$.
+
+
+Posteriomente, visualizamos la relación entre la variable auxiliar (empleados) y la variable de interés (rem) a nivel de $U$ y a nivel del dominio $U_d$. El objetivo es observar si el dominio presenta sus propias caracteristicas.
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(U, aes(x=empleados, y=rem,color=as_factor(d)))+
+  geom_point(alpha=0.4)+ geom_smooth(method='lm',se=FALSE)+
+  theme_bw()
+
+```
+
+### Estimación puntual del modelo
+Estimamos el modelo $$\hat m(x)= \hat B_{d0} +\hat B_{d1} x$$,
+
+utilizando únicamente los datos de la muestra aletoria $s$ que pertencen al dominio de interés $U_d$
+   
+```{r}
+modelo_d_est= s %>% filter(d==1) %>% lm(rem~empleados,
+                     weights=bw, 
+                     data=.)
+```
+
+```{r}
+modelo_d_est %>% summary()
+```
+
+## Estimador GREG directo
+
+Una vez estimado el modelo, procedemos a realizar las predicciones de la variable $y$ unicamente para los individuos (empresas) de la población pertenecientes al dominio  $U_d$
+
+```{r}
+yd_est = U %>% filter(d==1) %>% select(empleados) %>% 
+              predict.lm(modelo_d_est, 
+                        newdata = .)
+```
+
+Computamos el estimador 
+
+$$\hat Y_{d}^{\text{GREG,D}}\sum\limits_{i\in U_d}=\hat m_d(\mathbf{x}_i)$$
+
+Recordemos que para estimar el modelo, se asume que  $\sigma_i^2=\lambda^{T}x_i$ y por lo tanto en el estimador GREG $\sum\nolimits_{i \in s_d}w_ie_i=0$
+
+
+```{r}
+(Y_d_est= sum(yd_est))
+```
+
+## Estimador GREG indirecto
+
+En este caso, estimamos un único modelo 
+
+$$\hat m(x)= \hat B_0 +\hat B_1 x$$,
+
+utilizando los datos de toda la muestra aleatoria $s$. 
+
+
+```{r}
+modelo_est= s %>% lm(rem~empleados,
+                     weights=bw, 
+                     data=.)
+```
+
+```{r}
+modelo_est %>% summary()
+```
+
+
+
+Una vez estimado el modelo, procedemos a realizar las predicciones de la variable $y$ únicamente para los individuos de la población pertenecientes al dominio $U_d$
+
+```{r}
+yd_est = U %>% filter(d==1) %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+```
+
+Luego, calculamos los erroes del modelo a nivel del dominio
+
+```{r}
+e_d = s %>% filter(d==1) %>% pull(rem)- s %>% filter(d==1) %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+
+## pull rem saca la muestra como un vector , agarra el modelo y predice como vector de diferencias 
+
+
+
+```
+
+El estimador GREG indirecto para $Y_d$ queda definido como
+
+$$ \hat Y_d^{\text{GREG,U}} =\sum\limits_{i\in U_d}\hat m(x) + \sum\limits_{i \in s_d} w_i e_{di}$$
+
+```{r}
+sum(yd_est) + (nrow(U)/nrow(s))*sum(e_d) ## suma de los devios = sum(e_d)
+```
+
+
+## Estimador calibrado 
+
+Realizamos la calibración utilizando la distancia lineal y los totales poblaciones corresponden al total de empresas del universo $N$ y el total de remuneraciones. Luego, los ponderadores resultantes $w_i^*$ son utilizados para computar la estimación del total de remuneraciones para el dominio de interés $U$
+
+$$\hat Y_d^{\text{cal,U}} =\sum\limits_{i\in s_d} w_i^*y_{i}$$
+
+```{r}
+pop_tot= c(nrow(U),
+           sum(U$empleados))
+
+cal = s %>% svydesign(id=~1, weights=~bw, data=.) %>%
+          calibrate(design=., ~empleados, pop_tot)
+
+s= s %>% mutate(w_cal=weights(cal))
+
+s %>% filter(d==1) %>%  summarise(sum(rem*w_cal)) %>% pull()
+```
+
+
+
+
+
+
+## distribución empirca de los estimadores
+
+```{r}
+R=1000
+Y_d_dir=as.numeric()
+Y_d_ind=as.numeric()
+Y_HT_d=as.numeric()
+Y_CAL_U=as.numeric()
+for (i in 1:R){
+s = U %>% slice_sample(n=500, 
+                       replace = FALSE) %>% 
+          mutate(bw=nrow(U)/n()) 
+
+
+#-------------------------------------------
+
+Y_HT_d[i]=s %>% filter(d==1) %>% summarise(sum(rem*bw)) %>% pull() ## estimador de ht 
+#-----------------------------------------------------------
+modelo_d_est= s %>% filter(d==1) %>% lm(rem~empleados, 
+                     weights=bw, 
+                     data=.)
+
+Y_d_dir[i]=U %>% filter(d==1) %>% select(empleados) %>%  ## estimador directo 
+              predict.lm(modelo_d_est, 
+                        newdata = .) %>% sum()
+#-------------------------------------------------------
+
+modelo_est= s %>% lm(rem~empleados,
+                     weights=bw, 
+                     data=.)
+yd_est = U %>% filter(d==1) %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+
+e_d = s %>% filter(d==1) %>% pull(rem)- s %>% filter(d==1) %>% select(empleados) %>% 
+              predict.lm(modelo_est, 
+                        newdata = .)
+
+Y_d_ind[i]=sum(yd_est) + (nrow(U)/nrow(s))*sum(e_d) ## estimador indirecto 
+
+#------------------------------------------------
+cal = s %>% svydesign(id=~1, weights=~bw, data=.) %>%
+          calibrate(design=., ~empleados, pop_tot)
+
+s= s %>% mutate(w_cal=weights(cal))
+
+Y_CAL_U[i] =s %>% filter(d==1) %>%  summarise(sum(rem*w_cal)) %>% pull()
+  
+}
+```
+
+
+### Resultados
+
+```{r}
+data_sim = tibble(TIPO=' GREG DIRECTO',ESTIMADOR=Y_d_dir) %>% 
+            bind_rows(tibble(TIPO='GREG INDIRECTO', ESTIMADOR=Y_d_ind)) %>% 
+ 
+                       bind_rows(tibble(TIPO='CAL_U', ESTIMADOR=Y_CAL_U)) %>% 
+                       bind_rows(tibble(TIPO='HT', ESTIMADOR=Y_HT_d))  
+  
+```
+
+
+```{r}
+data_sim %>% group_by(TIPO) %>% 
+  summarise(PROMEDIO=mean(ESTIMADOR),
+            VAR=var(ESTIMADOR))
+```
+
+Visualizations
+
+```{r}
+data_sim %>% ggplot()+ 
+  geom_density(aes(x=ESTIMADOR, 
+                   fill=as_factor(TIPO)),
+               alpha=0.2) +
+  theme_bw()
+```
+
+
+
+

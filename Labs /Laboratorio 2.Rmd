@@ -1,0 +1,597 @@
+---
+title: "Lab 3 - Muestreo en varias etapas"
+author: "Matias Bajac"
+date: '2024-12-30'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+############
+# UNIVERSO #
+############
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(sampling) ##Muestra
+library(srvyr) ##Estimación
+library(here)
+```
+
+```{r}
+
+Universo <- read_csv(here("Labs ","ECH_2022.csv"))%>%
+  filter(
+    dpto == 1, #Montevideo
+    e27 >= 14 #Edad
+  )%>%
+  transmute(
+    ID_HOGAR = ID,
+    ID_PERSONA = paste(ID,nper,sep = "-"),
+    secc,
+    segm,
+    UPM = paste(secc,segm,sep = "-"), #Identificamos los segmentos censales a apartir del identificador de sección y segmento.
+    Estrato_Socioeconomico = factor(
+      case_when(
+        estred13 == 1 ~ "Montevideo Bajo",
+        estred13 == 2 ~ "Montevideo Medio Bajo",
+        estred13 == 3 ~ "Motevideo Medio",
+        estred13 == 4 ~ "Montevideo Medio Alto",
+        estred13 == 5 ~ "Montevideo Alto"
+    ),
+    ordered = TRUE,
+    levels = c("Montevideo Bajo","Montevideo Medio Bajo","Motevideo Medio","Montevideo Medio Alto","Montevideo Alto")
+    ),
+  Sexo = case_when(
+    e26 == 1 ~ "Hombre",
+    e26 == 2 ~ "Mujer",
+    TRUE ~ "Sin dato"
+  ),
+  Condicion_Actividad = POBPCOAC,
+  pobre = pobre,
+  Ingreso_Persona = PT1,
+  Edad = e27
+  )
+
+```
+
+
+
+#################################  
+# CALCULO PARÁMETROS DE INTERÉS #
+#################################
+
+```{r}
+
+Universo%>%
+  summarise(
+    N = n(),
+    Tasa_pobreza = mean(pobre),
+    Cantidad_personas_pobres = sum(pobre),
+    Ingreso_Promedio = mean(Ingreso_Persona) 
+  )
+
+Universo%>%
+  group_by(
+    Estrato_Socioeconomico
+  )%>%
+  summarise(
+    Tasa_pobreza = mean(pobre),
+    Cantidad_personas_pobres = sum(pobre),
+    Ingreso_Promedio = mean(Ingreso_Persona) 
+  )
+
+Universo%>%
+  group_by(
+    Sexo
+  )%>%
+  summarise(
+    Tasa_pobreza = mean(pobre),
+    Cantidad_personas_pobres = sum(pobre),
+    Ingreso_Promedio = mean(Ingreso_Persona) 
+  )
+```
+
+
+#BUSCAREMOS ESTIMAR ESOS PARAMETROS.
+
+# Se llevará a cabo una estrategia de muestreo indirecto.
+
+# 1) Se estratifican las UPM (segmentos censales) con base en el estrato scocioeconómico al que pertenecen.
+
+# 2) Dentro de cada estrato, se realizará un diseño proporcional al tamaño de UPM´s 
+#    - el tamaño de muestra por estrato se asigna de manera proporcional a la cantidad de hogares x estrato. (Se asigna mayor
+#      tamaño de muestra en aquellos estratos en donde hay mayor cantidad de hogares).
+
+# 3) Dentro de cada UPM muestreada en la primera etapa, se seleccionan hogares siguiendo un MAS.
+
+# 4) Dentro de cada hogar, selecciono a una persona al azar.
+
+# Se desea tener una muestra de aproximadamente 1500 individuos - En cada segmento se encuestará a 5 hogares - Se muestrea a 1500/5 = 300 segmentos
+
+#################
+#MARCO DE UPM´S #
+#################
+
+```{r}
+Marco_UPMS <- Universo%>%
+  group_by(
+    UPM,
+    Estrato_Socioeconomico
+  )%>%
+  summarise(
+    Cantidad_Hogares = n_distinct(ID_HOGAR) #MOS: Medidad de tamaño de los segmentos.
+  )
+
+Marco_UPMS_Muestra <- Marco_UPMS%>%
+  filter(
+    Cantidad_Hogares >=5 #nos aseguramos de que todos los segmentos tengan al menos 5 hogares, son muy pocos los que tienen menos de 5.
+  )
+```
+
+
+#############################
+# CÁLCULO TAMAÑO DE MUESTRA #
+#############################
+
+```{r}
+Tam_muestra_x_estrato <- Marco_UPMS_Muestra%>%
+  group_by(
+    Estrato_Socioeconomico
+  )%>%
+  summarise(
+    N_segmentos = n(),
+    N_hogares_en_segmento = sum(Cantidad_Hogares),
+    Tam_muestra = round(300*N_hogares_en_segmento/sum(Marco_UPMS_Muestra$Cantidad_Hogares))
+  ) #La muestra queda de 301 por redondeo
+
+```
+
+###################################
+# PRIMERA ETAPA: MUESTRA DE UPM´S #
+###################################
+
+```{r}
+set.seed(2023)
+
+Marco_UPMS_Muestra <- Marco_UPMS_Muestra%>%
+  arrange(
+    Estrato_Socioeconomico
+  )
+
+Muestra_de_UPMS <- sampling::strata(
+  Marco_UPMS_Muestra,
+  stratanames = "Estrato_Socioeconomico",
+  size = Tam_muestra_x_estrato$Tam_muestra,
+  method = "systematic",
+  pik = Marco_UPMS_Muestra$Cantidad_Hogares, #Necesariamente hay que poner Tabla$MOS
+  description = TRUE
+)
+
+Muestra_UPMS_con_Info <- sampling::getdata(
+  Marco_UPMS_Muestra,
+  Muestra_de_UPMS
+)%>%
+  rename(
+    P_INC_UPM = Prob
+  )
+```
+
+
+# Verifico que el tamaño de muestra sea el indicado
+
+```{r}
+Muestra_UPMS_con_Info%>%
+  group_by(
+    Estrato_Socioeconomico
+  )%>%
+  count()
+```
+
+
+##########################################
+# SEGUNDA ETAPA: MUESTRA DE USM: HOGARES #
+##########################################
+
+
+```{r}
+Marco_Segunda_etapa <- Muestra_UPMS_con_Info%>%
+  left_join(
+    Universo%>%
+      select(
+        ID_HOGAR,
+        UPM
+      )%>%
+      group_by(
+        ID_HOGAR
+      )%>%
+      slice(1),
+    by = "UPM"
+  )%>%
+  arrange(
+    UPM
+  )
+
+Muestra_Segunda_etapa <- sampling::strata(
+  Marco_Segunda_etapa,
+  stratanames = "UPM",
+  size = rep(5,nrow(Muestra_UPMS_con_Info)),
+  method = "srswor"
+)
+
+Muestra_USM_con_Info <- sampling::getdata(
+  Marco_Segunda_etapa,
+  Muestra_Segunda_etapa
+)%>%
+  rename(
+    P_INC_USM = Prob
+  )
+```
+
+###########################################
+# TERCERA ETAPA: MUESTRA DE UUM: PERSONAS #
+###########################################
+
+```{r}
+Marco_ultima_etapa  <- Muestra_USM_con_Info %>%
+  left_join(
+    Universo%>%
+      transmute(
+        ID_HOGAR,
+        ID_PERSONA
+      ),
+    by = "ID_HOGAR"
+  )
+
+Muestra_Final <- sampling::strata(
+  Marco_ultima_etapa,
+  strata = "ID_HOGAR",
+  size = rep(1,nrow(Muestra_USM_con_Info)),
+  method = "srswor"
+)
+
+MUESTRA <- sampling::getdata(
+  Marco_ultima_etapa,
+  Muestra_Final
+)%>%
+  transmute(
+    ID_PERSONA,
+    ID_HOGAR,
+    UPM,
+    Estrato_Socioeconomico,
+    PI = P_INC_UPM*P_INC_USM*Prob,
+    WI = 1/PI
+  )%>%
+  left_join(
+    Universo%>%
+      select(
+        -ID_HOGAR,
+        -UPM,
+        -Estrato_Socioeconomico
+      ),
+    by = "ID_PERSONA"
+      )
+
+```
+
+
+################
+# ESTIMACIONES #
+################
+
+```{r}
+Design <- MUESTRA %>%
+  as_survey_design(
+    id = UPM, #Acá se asignará la variable de identificación de la UPM y luego la variable de estratificación de la primera etapa (si la hubo)
+    strata = Estrato_Socioeconomico,
+    weights = WI
+  )
+
+Design%>%
+  summarise(
+    Tasa_de_pobreza = survey_mean(pobre,vartype =c("se", "cv"), deff=TRUE)
+  )
+
+
+Design%>%
+  group_by(Estrato_Socioeconomico)%>%
+  summarise(
+    Tasa_de_pobreza = survey_mean(pobre,vartype =c("se", "cv"), deff=TRUE)
+)
+
+
+Design%>%
+  summarise(
+    Cantidad_de_personas = survey_total(1,vartype =c("se", "cv"), deff=TRUE)
+  )
+
+Design%>%
+  summarise(
+   Ingreso_Promedio = survey_mean(Ingreso_Persona,vartype =c("se", "cv"), deff=TRUE)
+  ) #EL DESIGN NO CALIBRA AL TOTAL POBLACIONAL
+
+Design%>%
+  group_by(Estrato_Socioeconomico)%>%
+  summarise(
+    Ingreso_Promedio = survey_mean(Ingreso_Persona,vartype =c("se", "cv"), deff=TRUE)
+  )
+```
+
+
+################
+# PONDERADORES #
+################
+
+```{r}
+Muestra_USM_con_Info%>%
+  ggplot(
+    aes(
+      x = P_INC_USM
+    )
+  )+
+  geom_histogram()+
+  labs(
+    title = "Distribución probabilidad de inclusión de hogares en la muestra",y = "N"
+  )
+
+MUESTRA %>%
+  ggplot(
+    aes(
+      x = WI
+    )
+  )+
+  geom_histogram()+
+  labs(
+    title = "Distribución de los ponderadores",
+    subtitle = "Individuos pertenecientes a la muestra",
+    y = "N"
+  )
+
+
+###############################
+# QUE PASABA SI TOMABA UN SI? #
+###############################
+
+Muestra_SI <- sampling::strata(
+  Universo%>%
+    transmute(
+      Estrato = 1
+    ),
+  strata = "Estrato",
+  size = 1500,
+  method = "srswor"
+)
+
+Muestra_SI_INFO <- Universo%>%
+  sampling::getdata(
+    Muestra_SI
+  )
+
+Design_SI <- Muestra_SI_INFO%>%
+  as_survey_design(
+    id = ID_PERSONA,
+    strata = Estrato,
+    weights = 1/Prob
+  )
+
+Design_SI%>%
+  summarise(
+    Tasa_de_pobreza = survey_mean(pobre,vartype =c("se", "cv"), deff=TRUE)
+  )
+
+################################
+# SI TOMO MUCHAS MUESTRAS ???? #
+################################
+
+
+SE_3E <- numeric()
+SE_2E <- numeric()
+SE_CON <- numeric()
+SE_SI <- numeric()
+
+for (i in seq(1,100,1)) {
+  
+  
+  Marco_UPMS_Muestra <- Marco_UPMS_Muestra%>%
+    arrange(
+      Estrato_Socioeconomico
+    )
+  
+  Muestra_de_UPMS <- sampling::strata(
+    Marco_UPMS_Muestra,
+    stratanames = "Estrato_Socioeconomico",
+    size = Tam_muestra_x_estrato$Tam_muestra,
+    method = "systematic",
+    pik = Marco_UPMS_Muestra$Cantidad_Hogares, #Necesariamente hay que poner Tabla$MOS
+    description = TRUE
+  )
+  
+  Muestra_UPMS_con_Info <- sampling::getdata(
+    Marco_UPMS_Muestra,
+    Muestra_de_UPMS
+  )%>%
+    rename(
+      P_INC_UPM = Prob
+    )
+  
+  # Verifico que el tamaño de muestra sea el indicado
+  
+  Muestra_UPMS_con_Info%>%
+    group_by(
+      Estrato_Socioeconomico
+    )%>%
+    count()
+  ##########################################
+  # SEGUNDA ETAPA: MUESTRA DE USM: HOGARES #
+  ##########################################
+  
+  Marco_Segunda_etapa <- Muestra_UPMS_con_Info%>%
+    left_join(
+      Universo%>%
+        select(
+          ID_HOGAR,
+          UPM
+        )%>%
+        group_by(
+          ID_HOGAR
+        )%>%
+        slice(1),
+      by = "UPM"
+    )%>%
+    arrange(
+      UPM
+    )
+  
+  Muestra_Segunda_etapa <- sampling::strata(
+    Marco_Segunda_etapa,
+    stratanames = "UPM",
+    size = rep(5,nrow(Muestra_UPMS_con_Info)),
+    method = "srswor"
+  )
+  
+  Muestra_USM_con_Info <- sampling::getdata(
+    Marco_Segunda_etapa,
+    Muestra_Segunda_etapa
+  )%>%
+    rename(
+      P_INC_USM = Prob
+    )
+  
+  ###########################################
+  # TERCERA ETAPA: MUESTRA DE UUM: PERSONAS #
+  ###########################################
+  
+  Marco_ultima_etapa  <- Muestra_USM_con_Info %>%
+    left_join(
+      Universo%>%
+        transmute(
+          ID_HOGAR,
+          ID_PERSONA
+        ),
+      by = "ID_HOGAR"
+    )
+  
+  Muestra_Final <- sampling::strata(
+    Marco_ultima_etapa,
+    strata = "ID_HOGAR",
+    size = rep(1,nrow(Muestra_USM_con_Info)),
+    method = "srswor"
+  )
+  
+  MUESTRA <- sampling::getdata(
+    Marco_ultima_etapa,
+    Muestra_Final
+  )%>%
+    transmute(
+      ID_PERSONA,
+      ID_HOGAR,
+      UPM,
+      Estrato_Socioeconomico,
+      PI = P_INC_UPM*P_INC_USM*Prob,
+      WI = 1/PI
+    )%>%
+    left_join(
+      Universo%>%
+        select(
+          -ID_HOGAR,
+          -UPM,
+          -Estrato_Socioeconomico
+        ),
+      by = "ID_PERSONA"
+    )
+  
+  ################
+  # ESTIMACIONES #
+  ################
+  
+  Design <- MUESTRA %>%
+    as_survey_design(
+      id = UPM, #Acá se asignará la variable de identificación de la UPM y luego la variable de estratificación de la primera etapa (si la hubo)
+      strata = Estrato_Socioeconomico,
+      weights = WI
+    )
+  
+ POBRES_3E <- Design%>%
+    summarise(
+      Tasa_de_pobreza = survey_mean(pobre,vartype =c("se", "cv"), deff=TRUE)
+    )
+ 
+ SE_3E[i] <- POBRES_3E[[2]]
+ 
+ Muestra_SI <- sampling::strata(
+   Universo%>%
+     transmute(
+       Estrato = 1
+     ),
+   strata = "Estrato",
+   size = 1500,
+   method = "srswor"
+ )
+ 
+ Muestra_SI_INFO <- Universo%>%
+   sampling::getdata(
+     Muestra_SI
+   )
+ 
+ Design_SI <- Muestra_SI_INFO%>%
+   as_survey_design(
+     id = ID_PERSONA,
+     strata = Estrato,
+     weights = 1/Prob
+   )
+ 
+ POBRES_SI <- Design_SI%>%
+   summarise(
+     Tasa_de_pobreza = survey_mean(pobre,vartype =c("se", "cv"), deff=TRUE)
+   )
+ 
+ SE_SI[i] <- POBRES_SI[[2]]
+}
+
+
+data.frame(
+  SE = SE_SI
+)%>%
+  ggplot(
+    aes(
+      x = SE_SI
+    )
+  )+
+  geom_histogram(
+    fill = "red",
+    alpha = 0.5
+  )+
+  geom_vline(
+    xintercept = mean(SE_SI),
+    linetype = "dashed",
+    size = 1,
+    colour = "red"
+  )+
+  geom_histogram(
+    inherit.aes = FALSE,
+    aes(
+      x = SE_3E
+    ),
+    data = data.frame(SE_3E),
+    fill = "blue",
+    alpha = 0.5
+  )+
+  geom_vline(
+    xintercept = mean(SE_3E),
+    linetype = "dashed",
+    size = 1,
+    colour = "blue"
+  )+
+  labs(
+    x = "SD",
+    y = "N",
+    title = "Distribución del SD de las estimaciones de tasa de pobreza",
+    subtitle = "En rojo diseño SI, en azul 3 etapas."
+  )
+```
+

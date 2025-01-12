@@ -1,0 +1,635 @@
+---
+title: "Calibración - parte I"
+author: "Muestreo II"
+date: "2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Paquetes
+
+Cargamos los paquetes que vamos a utilizar
+
+```{r warning=FALSE , message=FALSE}
+library(tidyverse)
+library(survey)
+```
+
+## marco muestral
+
+Carga el marco muestral $F$ y mira los datos
+
+
+```{r message=FALSE}
+library(here)
+library(tidyverse)
+frame <- read_csv("Datos/frame.csv")
+here()
+```
+
+```{r}
+frame %>% head()
+
+```
+
+Vemos estructura del marco muestral $F$
+
+base de persona a donde pertenece (idhog) 
+
+U = personas ocuopadas en montevideo 
+
+
+```{r}
+frame %>%  glimpse()
+```
+
+## Parámetro de interés
+
+El objetivo es estimar el ingreso ($y$) promedio de las personas 
+
+$$ \bar Y = \frac{1}{N}\times \sum\limits_{i\in U} y_i$$
+
+```{r}
+ frame %>% summarise(ingreso_prom=mean(ingreso))
+```
+hacer la post estratificacion de varias variables cualitativas 
+edad lo pongo en tramos de edad 
+PS = post estrata de edad 
+
+step 1 
+
+## Creación de variables en el marco (frame)
+
+Como primer paso, creamos variables auxiliares/control $\mathbf{x}$ que vamos a utilizar para la calibrar ( e.g. tramos de edad, educación, sexo, etc).
+\\
+
+Dado que las variables  edad y educación están expresadas en años (numéricas) creamos variables en tramos (**categóricas**) utilizando la función `cut` 
+
+
+```{r}
+frame = frame %>% mutate(PS_edad = cut(edad, #VARIABLE A RECODIFICAR
+                                      breaks=c(14,20,25,30,40,50,60,Inf), #CORTES
+                                      right=FALSE),# ABIERTOS POR LA DERECHA
+                            PS_educ= cut(educ,
+                                        breaks=c(0,6,9,12,15,18,Inf),
+                                        right=FALSE))
+
+
+```
+r sabe que es una variable cualti cuando la variable esta como factor ( originalmente esta como caracter)
+Luego, transformamos la variable sexo como factor
+
+```{r}
+frame = frame %>% mutate(sexo=factor(sexo))
+```
+
+step 1.2
+## Conteos poblacionales
+
+Computamos los conteos poblacionales para ambas variables
+
+```{r}
+pop_count_edad = frame %>% count(PS_edad) %>% rename(Freq=n)
+pop_count_edad
+```
+
+```{r}
+pop_count_educ = frame %>% count(PS_educ) %>% rename(Freq=n)
+pop_count_educ
+```
+
+Visualizamos si los post-estratos explican algo la variabilidad de la variable de interés 
+
+```{r}
+ggplot(frame, aes(x=ingreso, y=PS_educ, fill=PS_educ))+ geom_boxplot()
+```
+
+```{r}
+ggplot(frame, aes(x=ingreso, y=PS_edad, fill=PS_edad))+ geom_boxplot()
+
+```
+
+Hacemos lo mismo pero para la variable sexo
+
+```{r}
+pop_count_sexo = frame %>% count(sexo) %>% rename(Freq=n)
+pop_count_sexo
+```
+
+
+```{r}
+ggplot(frame, aes(x=ingreso, y=sexo, fill=sexo))+ geom_boxplot()
+```
+
+step 2
+## Muestra
+
+Seleccionamos una muestra de tamaño $n=500$ bajo un muestreo aleatorio simple sin reposición 
+SI
+```{r}
+set.seed(123)
+N=frame %>% nrow() 
+n=500 
+
+#PERSONAS SELECCIONADAS (LAS ETIQUETAS)
+incluidas=sample(1:N,           #ETIQUETAS
+                 size=n,        # TAMAÑO DE MUESTRA
+                 replace=FALSE) # SIN REMPLAZO
+
+muestra = frame %>% slice(incluidas)
+
+## slice se queda con las que salieron en incluidas del frame 
+
+
+```
+step 3 
+
+## Ponderadores originales o base 
+
+Calculamos para todas las personas seleccionadas en la muestra los ponderadores base $w_i=1/\pi_i=N/n$ y la tasa de muestreo $f=n/N$, la cual, va a ser utilizada como insumo para el computo de los $SE$ de las estimaciones
+
+```{r}
+muestra = muestra %>% mutate (w=N/n, f=n/N)
+
+sum(muestra$w)
+
+
+```
+step 4 
+
+## Carga el diseño muestral
+
+Utilizamos la función `svydesign` del paquete `survey` para definir el diseño muestral, es decir, describimos en el R como fue la estrategia de selección de la muestra (i.e. el diseño muestral). Para ello, indicamos que es un muestreo directo, ponderadores y la tasa de muestreo
+
+```{r}
+library(survey)
+(p=svydesign(id=~0,       #NO CLUSTER
+             strata=NULL, #NO ESTRATOS
+             fpc=~f,      #TASA DE MUESTREO
+             weights=~w,  #PONDERADORES BASE
+             data=muestra))
+
+```
+
+Recordemos que en el objeto `p`, tenemos la muestra (el dataset), el sistema de ponderadores $w$ y la información que le demos para computar los SEs de las estimaciones
+
+## Estimaciones utilizando los ponderadores originales
+
+Estimación puntual del parámetro de interés
+
+```{r}
+(est =svymean(~ingreso,p))
+```
+
+Luego, computamos el cv de la estimación
+
+```{r}
+cv (est)
+```
+
+
+## Post estratificación
+
+### Caso 1
+step 1 
+
+En una primera instancia, post-estratificamos utilizando como post estratos la variable de edad.
+
+Como primer paso vemos como estima nuestra muestra el tamaño o conteo de las celdas 
+
+```{r}
+
+svytotal(~PS_edad,p) 
+```
+el total es el ngorro y 
+Otra forma para estimar lo anterior, es por medio de la función `svytable` (pero no computa los SEs)
+
+```{r}
+svytable(~PS_edad,p) %>% as_tibble()
+```
+step 2 
+
+Para calibrar por medio de la post-estratificación utilizamos la función `postStratify`
+
+```{r}
+post=postStratify(design=p, # diseño original
+                  strata=~PS_edad,  # post- estratos
+                  population=pop_count_edad) # totales poblacionales conteo pob Ng 
+# tiene que conicidir el nombre de las variables 
+
+```
+
+$\rightarrow$ info de disenio (estrategia selec) = p
+$\rightarrow$ $w_{i}^{*} = \big(N_g/\hat{N_g}\big)w
+
+
+
+En `post`, tenemos toda la información que tenia `p`, más los nuevo ponderadores calibrados $w_i^*=g_i\times w_i=\frac{N_g}{\hat N_g}\times w_i=\frac{N_n}{n_g}$ donde $n_g$ es el tamaño de muestra efectivo en el post-estrato $g$ y también se tiene la información necesaria para computar los SEs teniendo en cuenta el diseño ḿas el métodod de estimación (i.e. los errores $e_i$).
+
+step 3 
+Guardamos los ponderadores calibrados en la muestra
+
+```{r}
+
+muestra  = muestra %>% mutate(w_cal=weights(post))
+```
+
+Verificamos que se cumpla la ecuación de calibración
+
+el se es 0 xq mide las variaciones entre muestra y muestra 
+el error estandar debe de dar 0 
+
+```{r}
+svytotal(~PS_edad,post)
+```
+step 4 
+Como se puede apreciar los SEs son cero, eso se debe a que los ponderadores calibrados estiman sin error los totales de los post-estratos y deja de existir la variación de las estimaciones entre muestra y muestra, la cual, era cuantificada por el SE.
+
+Computamos la estimación del parámetro de interés y comparamos el CV
+
+```{r}
+est_post = svymean(~ingreso,post, deff=TRUE)
+est_post
+```
+
+```{r}
+cv (est_post)
+```
+
+
+hubo una leve mejora respecto al SI (deff)
+### Caso 2
+
+
+
+Ahora utilizamos como post-estratos la **educación**.
+
+```{r}
+
+post2=postStratify(design=p, # dise?o original
+                  strata=~PS_educ,  # post- estratos
+                  population=pop_count_educ) # totales poblacionales
+
+```
+
+Computamos la estimación del parámetro de interés y comparamos el CV
+
+```{r}
+(est_post2=svymean(~ingreso,post2,deff=TRUE))
+
+```
+
+```{r}
+cv(est_post2)
+```
+
+### Caso 3
+
+Ahora, los post-estratos, los definimos utilizando la interacción de dos variables: **educación** y **sexo**.
+
+aumenta en numero de celdas 
+
+```{r}
+frame = frame %>% mutate(PS_educ_sexo=paste(PS_edad,sexo,sep='-'))
+#join?
+
+```
+
+Computamos los conteos poblacionales $N_g$
+
+```{r}
+pop_count_educ_sexo = frame %>% count(PS_educ_sexo) %>% rename(Freq=n)
+pop_count_educ_sexo 
+```
+
+Visualizamos si los post-estratos explican de alguna forma la variabilidad de los ingresos
+
+```{r}
+ggplot(frame, aes(x=ingreso, y=PS_edad, fill=PS_educ_sexo))+ geom_boxplot()
+```
+
+
+Actualizamos la muestra y el diseño 
+
+```{r}
+muestra = muestra  %>% mutate(PS_educ_sexo=paste(PS_edad,sexo,sep='-'))
+(p=svydesign(id=~0,       #NO CLUSTER
+             strata=NULL, #NO ESTRATOS
+             fpc=~f,      #TASA DE MUESTREO
+             weights=~w,  #PONDERADORES BASE
+             data=muestra))
+```
+
+Hacemos la post-estratificación
+
+```{r}
+
+post3=postStratify(design=p, # dise?o original
+                  strata=~PS_educ_sexo,  # post- estratos
+                  population=pop_count_educ_sexo ) # totales poblacionales
+
+```
+
+
+Computamos la estimación del parámetro de interés y comparamos el CV
+
+```{r}
+(est_post3=svymean(~ingreso,post3,deff=TRUE))
+```
+```{r}
+cv(est_post3)
+```
+
+Vemos los factores de ajustes $g_i$
+
+los ajsutes deben ser cercanos a 1 si la muestra es suficentemente grande 
+los ajustes te da indicios de no respuesta y sesgo
+aumentar n a ver que pasa con los ajustes 
+
+
+
+
+```{r}
+muestra %>% mutate(g=weights(post3)/w) %>% group_by(PS_educ_sexo) %>% summarise(ajustes=mean(g))
+```
+
+
+```{r}
+muestra = muestra %>% mutate(w_cal=weights(post3))
+ggplot(muestra, aes(x=w_cal)) +geom_histogram(fill='blue', alpha=0.4)+theme_bw()
+```
+el 80 es el que no responde, los estoy haciendo pesar mucho y en realidad no dice nada 
+
+se recorta o se hace una post est de forma iterativa 
+
+recorto e itero 
+## Raking
+
+### Caso 1
+
+Implementamos el **estimador raking** utilizando `Educación` y `Sexo`. Vemos dos formas de hacerlo: `rake` (tradicional) y con la función `calibrate` (**recomendada!**)
+
+
+```{r}
+rake1=rake(design=p, #Diseño
+           sample.margins=list(~PS_educ,~sexo), 
+           population.margins=list(pop_count_educ ,pop_count_sexo))
+
+# agarro ed hago la pos estr y va estimando las variables en forma iterativa 
+
+
+
+```
+
+EL nombre de los argumentos no lo tenemos porque poner
+
+
+```{r}
+rake1=rake(p,
+           list(~PS_educ,~sexo),
+           list(pop_count_educ ,pop_count_sexo))
+```
+
+
+Corrroboramos las estimaciones de las marginales (i.e. la ecuacieon de calibración)
+
+```{r}
+ svytotal(~PS_educ,rake1)
+
+
+```
+
+
+```{r}
+svytotal(~sexo,rake1)
+```
+
+Computamos la estimación del ingreso promedio
+
+```{r}
+(est.rake1=svymean(~ingreso,rake1,deff=TRUE))
+```
+
+
+```{r}
+cv(est.rake1)
+```
+
+Vemos la distribución de los factores de ajuste 
+
+```{r}
+muestra = muestra %>% mutate(g_rake1=weights(rake1)/w)
+ggplot(muestra, aes(x=g_rake1)) +geom_histogram(fill='red',color='white',alpha=0.3)+theme_bw()
+```
+
+
+Los nuevos ponderadores $w^*$ estiman sin error el total de las marginales, es decir, el total de personas por sexo y el total de personas por nivel educativo.
+
+Es importante tener en cuenta que **no estiman sin error la interacción** de las dos variables (clasificación cruzada). Es decir, el total de personas por nivel educativo y sexo.
+
+### Caso 2 raking - Educación, sexo y Edad
+
+```{r}
+rake2=rake(design=p,
+           sample.margins=list(~PS_educ,~sexo,~PS_edad),
+           population.margins=list(pop_count_educ,pop_count_sexo,pop_count_edad))
+```
+
+Corroboramos que se cumplan las ecuaciones de calibración
+
+```{r}
+svytotal(~sexo,rake2)
+```
+
+
+```{r}
+svytotal(~PS_edad,rake2)
+```
+
+```{r}
+svytotal(~PS_educ,rake2)
+```
+
+Podemos aumentar el número de iteraciones?...no parece ser necesario.
+
+Vemos la distribución de los factores de ajuste 
+
+```{r}
+muestra = muestra %>% mutate(g_rake2=weights(rake2)/w)
+ggplot(muestra, aes(x=g_rake2)) +geom_histogram(fill='blue',color='white',alpha=0.3)+theme_bw()
+```
+ 
+Computamos la estimación del ingreso promedio
+
+```{r}
+est_rake2=svymean(~ingreso,rake2,deff=TRUE)
+est_rake2
+
+```
+
+```{r}
+cv(est_rake2)
+```
+
+Visualizamos la relación entre los dos factores de ajuste utilizando raking
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(muestra, aes(x=g_rake1,y=g_rake2)) + geom_point(color='blue', size=4, alpha=0.4)+theme_bw()
+```
+ 
+
+##  Simulaciones raking
+
+* Simulamos 1000 muestras bajo un SI.
+
+* En cada una calculamos la estimación utilizando los ponderadores originales $w_i=N/n$
+* En cada una realizamos el raking con educación, edad y sexo (`rake2`). 
+* Calculamos las estimaciones y los SE.
+* Vemos las propiedades de ambos estimadores (insesgamiento, varianza y “normalidad”).
+
+```{r}
+
+frame =read.csv('frame.csv')
+
+frame = frame %>% mutate(PS_edad = cut(edad, #VARIABLE A RECODIFICAR
+                                      breaks=c(14,20,25,30,40,50,60,Inf), #CORTES
+                                      right=FALSE),# ABIERTOS POR LA DERECHA
+                            PS_educ= cut(educ,
+                                        breaks=c(0,6,9,12,15,18,Inf),
+                                        right=FALSE),
+                         sexo=factor(sexo))
+
+# computa conteos poblacionales
+
+pop_count_educ = frame %>% count(PS_educ) %>% rename(Freq=n)
+pop_count_edad = frame %>% count(PS_edad) %>% rename(Freq=n)
+pop_count_sexo = frame %>% count(sexo) %>% rename(Freq=n)
+
+#--------------------------------------------------------------------
+# CREA VARIABLES NUMERICAS (VACIAS)
+
+HT=as.numeric()
+RAKE=as.numeric()
+VAR.HT=as.numeric()
+VAR.RAKE=as.numeric()
+#--------------------------------------------------------------------
+# REALIZA 10000 SIMULACIONES
+
+N=nrow(frame) 
+n=1000 
+#calcula tasa de muestreo y ponderadores base
+
+frame = frame %>% mutate(w=N/n, f=1/w)
+
+for ( i in 1:1000)
+    {
+     #PERSONAS SELECCIONADAS (LAS ETIQUETAS)
+    incluidas=sample(1:N,           #ETIQUETAS
+                     size=n,        # TAMA?O DE MUESTRA
+                     replace=FALSE) # SIN REMPLAZO
+ 
+     # extrae del marco las seleccaionadas
+    muestra = frame %>% slice(incluidas)
+    
+    # carga el dise?o
+    p=svydesign(id=~0,       #NO CLUSTER
+                 strata=NULL, #NO ESTRATOS
+                 fpc=~f,      #TASA DE MUESTREO
+                 weights=~w,  #PONDERADORES BASE
+                 data=muestra)
+    
+    r=rake(design=p,
+               list(~PS_educ,~sexo,~PS_edad),
+               list(pop_count_educ,pop_count_sexo,pop_count_edad))
+    
+    HT[i]=svymean(~ingreso,p)[1]
+    RAKE[i]=svymean(~ingreso,r)[1]
+    VAR.HT[i]=SE(svymean(~ingreso,p))^2
+    VAR.RAKE[i]=SE(svymean(~ingreso,r))^2
+    }
+```
+
+### Promedio de las estimaciones del estimador HT ("esperanza")
+```{r}
+mean(HT)
+```
+
+
+###  Promedio de las estimaciones del estimador RAKE ("esperanza")
+```{r}
+mean(RAKE)
+```
+
+### estimación del efecto de diseño
+```{r}
+(DEFF=var(RAKE)/var(HT))
+
+```
+
+
+### Sesgo del estimador de la varianza del raking
+
+```{r}
+(mean(VAR.RAKE)/var(RAKE))
+```
+
+
+### Distribución empirica de los estimadores
+
+```{r}
+df = tibble(estimador=factor(c(rep('HT',1000), rep('Rake',1000))), estimaciones=c(HT, RAKE))
+
+```
+
+
+
+```{r}
+ggplot (df, aes(x=estimaciones,fill=estimador))+geom_density(alpha=0.5, adjust=2) +theme_bw()
+```
+
+
+## La función **calibrate**
+
+* Permite realizar raking (con variables cualitativas (rake) y **cuantitativas**).
+
+* Permite realizar estimadores de regresión (calibrados con función de distancia lineal).
+
+* Serie de argumentos para restringir los ajustes $g_i$.
+
+La función **calibrate** permite varios argumentos (otros más adelante)
+
+* `design` = objeto con el diseño muestral original
+* `formula` = Modelo con las variables de control para la calibración
+* `population` = Variable (vector) con los totales o una lista en el caso de raking
+* `calfun`= Función para la calibración. Lineal, Raking, logit, etc
+
+### Caso 2 raking - Educación, sexo y Edad (volvemos)
+
+Indicamos tamaño de la población ($N$) y desechamos la primera categoría de cada
+una de las variables.
+
+```{r}
+counts=c(nrow(frame), # observaciones 
+         pop_count_educ$Freq[-1], # agarro la col de los conteos de educ y le saco 
+         pop_count_sexo$Freq[-1],
+         pop_count_edad$Freq[-1])
+
+
+```
+
+Hacemos la calibración
+
+```{r}
+r2=calibrate(design=p, 
+            formula=~PS_educ+sexo+PS_edad,
+            population=counts, 
+            calfun="raking")
+```
+
+
+

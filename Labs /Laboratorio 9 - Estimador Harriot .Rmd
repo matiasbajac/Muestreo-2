@@ -1,0 +1,767 @@
+---
+title: "Laboratorio 9 - Fay Herriot"
+author: "Matias Bajac"
+date: '2024-12-30'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(tidyverse)
+library(sae)
+library(data.table)
+library(survey)
+library(srvyr)
+ECH_2022 <- read_csv("ECH_2022.csv")
+
+```
+
+
+
+
+```{r}
+BASE <- ECH_2022%>%
+  filter(
+    dpto == 1,
+    e27 >= 14
+  )%>%
+  transmute(
+    id_estadistico = paste(ID,nper,sep = "-"),
+    ccz,
+    barrio,
+    pobre,
+    Ingreso = PT1,
+    Ocupado = fifelse(
+      POBPCOAC == 2,
+    1,
+    0
+  ),
+  Jubilado = fifelse(
+    POBPCOAC == 10,
+    1
+    ,0
+  ),
+  MIDES = fifelse(
+    g255 == 1,
+    1,
+    0
+  ),
+  Canasta_mides = INDAEMER,
+  Asignacion_familiar = g257,
+  Leche_en_polvo = LECHEENPOL
+  )
+
+#Ingreso promedio
+mean(BASE$Ingreso)
+
+#Construyo auxiliares
+
+AUXILIARES <- BASE%>%
+  group_by(
+    barrio
+  )%>%
+  summarise(
+    Ingreso_Promedio = mean(Ingreso),
+    N_Ocupados = sum(Ocupado),
+    N_Jubilados = sum(Jubilado),
+    N_MIDES = sum(MIDES),
+    S_MIDES = sum(Canasta_mides),
+    S_Asignaciones = sum(Asignacion_familiar),
+    S_Leche_en_polvo = sum(Leche_en_polvo)
+  )
+```
+
+
+#TOMAMOS MUESTRA BAJO M.A.S DE n = 1500
+
+```{r}
+set.seed(2050)
+
+Muestra <- BASE[
+  sample(nrow(BASE), size=1500),
+]%>%
+  mutate(
+    W = 17384/1500
+  )
+
+#Cantidad de casos por barrio
+
+n_barrios <- Muestra%>%
+  group_by(
+    barrio
+  )%>%
+  count()
+
+
+Design <- as_survey_design(
+  Muestra,
+  w = W
+)
+
+Design%>%
+  summarise(
+    Ingreso_Promedio = survey_mean(Ingreso,vartype = c("ci","cv"))
+  )
+
+Estimaciones_directas <- Design%>%
+  group_by(
+    barrio
+  )%>%
+  summarise(
+    Ingreso_Promedio = survey_mean(Ingreso,vartype = c("cv","var"))
+  )%>%
+  left_join(
+    AUXILIARES%>%
+      select(
+        barrio,
+        Ingreso_Promedio_real = Ingreso_Promedio
+      )
+  )%>%
+  left_join(
+    AUXILIARES%>%
+      select(
+        -Ingreso_Promedio
+      )
+  )
+```
+
+
+# Distribución del CV del estimador HT
+
+```{r}
+Estimaciones_directas%>%
+  ggplot(
+    aes(
+      x = Ingreso_Promedio_cv*100
+    )
+  )+
+  geom_boxplot()
+```
+
+
+# Estimador de Fay-Herriot
+
+```{r}
+attach(Estimaciones_directas) #La librería parece tener un problema cuando asignas el objeto manualmente
+
+Estimaciones_SAE <- eblupFH(
+  Ingreso_Promedio ~ N_Ocupados + 
+    N_Jubilados + 
+    N_MIDES +
+    S_MIDES +
+    S_Asignaciones +
+    S_Leche_en_polvo,
+  vardir = Ingreso_Promedio_var
+)
+
+Estimaciones_SAE$fit
+
+ECM_SAE <- mseFH(
+  Ingreso_Promedio ~ N_Ocupados + 
+    N_Jubilados + 
+    N_MIDES +
+    S_MIDES +
+    S_Asignaciones +
+    S_Leche_en_polvo,
+  vardir = Ingreso_Promedio_var
+)
+```
+
+
+# Construímos tabla para comparar valores
+
+```{r}
+TABLA_SAE <- data.frame(
+Barrio = seq(1,62,1),  
+FH = Estimaciones_SAE$eblup,
+ECM = ECM_SAE$mse,
+CV_FH = (sqrt(ECM_SAE$mse)/Estimaciones_SAE$eblup)*100
+)%>%
+  left_join(
+    Estimaciones_directas%>%
+      transmute(
+        Barrio = barrio,
+        Ingreso_Promedio,
+        Ingreso_Promedio_var,
+        Ingreso_Promedio_real,
+        Ingreso_Promedio_cv = Ingreso_Promedio_cv*100
+      )
+  )
+
+
+TABLA_SAE%>%
+  ggplot(
+    aes(
+      x = Barrio
+    )
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = FH,
+      colour = "Estimador FH"
+    ),
+    alpha = 0.5
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = Ingreso_Promedio,
+      colour = "Estimador HT"
+    ),
+    alpha = 0.5
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = Ingreso_Promedio_real,
+      colour = "Ingreso promedio real"
+      
+    ),
+    size = 1.9,
+    alpha = 0.3
+  )+
+  scale_color_manual(values = c("Estimador FH" = "blue",
+                                "Estimador HT" = "green", 
+                                "Ingreso promedio real" = "red"))+
+  labs(
+    title = "Ingreso promedio estimado por barrio"
+  )
+
+```
+
+# Comparación ECM
+
+```{r}
+TABLA_SAE%>%
+  ggplot(
+    aes(
+      x = Barrio
+    )
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = ECM,
+      colour = "ECM FH"
+    ),
+    alpha = 0.5
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = Ingreso_Promedio_var,
+      colour = "VAR HT"
+    ),
+    alpha = 0.5
+  )+
+  scale_color_manual(values = c("ECM FH" = "blue",
+                                "VAR HT" = "green"))+
+  labs(
+    title = "ECM del estimador por barrio"
+  )
+```
+
+
+# Comparación CV
+```{r}
+ABLA_SAE%>%
+  ggplot(
+    aes(
+      x = Barrio
+    )
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = CV_FH,
+      colour = "CV FH"
+    ),
+    alpha = 0.5
+  )+
+  geom_point(
+    aes(
+      x = Barrio,
+      y = Ingreso_Promedio_cv,
+      colour = "CV HT"
+    ),
+    alpha = 0.5
+  )+
+  scale_color_manual(values = c("CV FH" = "blue",
+                                "CV HT" = "green"))+
+  labs(
+    title = "CV del estimador por barrio"
+  )
+
+# Boxplot ECM
+
+TABLA_SAE%>%
+  transmute(
+    barrio,
+    "ECM FH" = ECM,
+     "VAR HT" = Ingreso_Promedio_var
+  )%>%
+  pivot_longer(
+    "ECM FH":"VAR HT",
+    names_to = "Estimador",
+    values_to = "ECM"
+  )%>%
+  ggplot(
+    aes(
+    y = Estimador,
+    x = ECM
+  ))+
+  geom_boxplot()+
+  labs(
+    title = "Boxplot distribución ECM de estimadores"
+  )
+
+```
+
+# Boxplot CV
+
+```{r}
+TABLA_SAE%>%
+  transmute(
+    barrio,
+    "CV FH" = CV_FH,
+    "CV HT" = Ingreso_Promedio_cv
+  )%>%
+  pivot_longer(
+    "CV FH":"CV HT",
+    names_to = "Estimador",
+    values_to = "CV"
+  )%>%
+  ggplot(
+    aes(
+      y = Estimador,
+      x = CV
+    ))+
+  geom_boxplot()+
+  labs(
+    title = "Boxplot distribución CV de estimadores"
+  )
+
+############################
+Barrio_20_DIR <- numeric()
+Barrio_20 <- numeric()
+
+for (i in 1:100) {
+  
+  set.seed(i)
+  
+  
+  Muestra <- BASE[
+    sample(nrow(BASE), size=1500),
+  ]%>%
+    mutate(
+      W = 17384/1500
+    )
+  
+  
+  Design <- as_survey_design(
+    Muestra,
+    w = W
+  )
+  
+  
+  Estimaciones_directas <- Design%>%
+    group_by(
+      barrio
+    )%>%
+    summarise(
+      Ingreso_Promedio = survey_mean(Ingreso,vartype = c("var"))
+    )%>%
+    left_join(
+      AUXILIARES%>%
+        rename(
+          Ingreso_Promedio_real = Ingreso_Promedio
+        ),
+      by = "barrio"
+    )
+  
+  attach(Estimaciones_directas)
+  
+  Estimaciones_SAE <- eblupFH(
+    Ingreso_Promedio ~ N_Ocupados + 
+      N_Jubilados + 
+      N_MIDES +
+      S_MIDES +
+      S_Asignaciones +
+      S_Leche_en_polvo,
+    vardir = Ingreso_Promedio_var
+  )
+  
+  TABLA_SAE <- data.frame(
+    Barrio = Estimaciones_directas$barrio,  
+    FH = Estimaciones_SAE$eblup)
+  
+  Barrio_20_DIR[i] <- Estimaciones_directas%>%filter(barrio == 20)%>%select(Ingreso_Promedio)%>%as.numeric()
+  Barrio_20[i] <- TABLA_SAE%>%filter(Barrio == 20)%>%select(FH)%>%as.numeric()
+  print(i)
+}
+```
+
+
+
+# Distribución estimador de FH en Barrio 20
+
+```{r}
+data.frame(
+  Estimacion = Barrio_20
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_20
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.7
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_20),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 26796.92,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH ingreso promedio en barrio 20"
+  )
+
+# Distribución estimador de FH y HT en Barrio 20
+
+data.frame(
+  Estimacion = Barrio_20
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_20
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.6
+  )+
+  geom_density(
+    inherit.aes = FALSE,
+    aes(
+      x = Barrio_20_DIR
+    ),
+    fill = "orange",
+    colour = "orange",
+    alpha = 0.6,
+    data = data.frame(Barrio_20_DIR = Barrio_20_DIR)
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_20),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 26796.92,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH y HT ingreso promedio en barrio 20"
+  )
+```
+
+######################
+# SIMULACION BARRIO 44
+
+############################
+
+```{r}
+Barrio_44_DIR <- numeric()
+Barrio_44 <- numeric()
+
+for (i in 1:100) {
+  
+  set.seed(i)
+  
+  
+  Muestra <- BASE[
+    sample(nrow(BASE), size=1500),
+  ]%>%
+    mutate(
+      W = 17384/1500
+    )
+  
+  
+  Design <- as_survey_design(
+    Muestra,
+    w = W
+  )
+  
+  
+  Estimaciones_directas <- Design%>%
+    group_by(
+      barrio
+    )%>%
+    summarise(
+      Ingreso_Promedio = survey_mean(Ingreso,vartype = c("var"))
+    )%>%
+    left_join(
+      AUXILIARES%>%
+        rename(
+          Ingreso_Promedio_real = Ingreso_Promedio
+        ),
+      by = "barrio"
+    )
+  
+  attach(Estimaciones_directas)
+  
+  Estimaciones_SAE <- eblupFH(
+    Ingreso_Promedio ~ N_Ocupados + 
+      N_Jubilados + 
+      N_MIDES +
+      S_MIDES +
+      S_Asignaciones +
+      S_Leche_en_polvo,
+    vardir = Ingreso_Promedio_var
+  )
+  
+  TABLA_SAE <- data.frame(
+    Barrio = Estimaciones_directas$barrio,  
+    FH = Estimaciones_SAE$eblup)
+  
+  Barrio_44_DIR[i] <- Estimaciones_directas%>%filter(barrio == 44)%>%select(Ingreso_Promedio)%>%as.numeric()
+  Barrio_44[i] <- TABLA_SAE%>%filter(Barrio == 44)%>%select(FH)%>%as.numeric()
+  print(i)
+}
+```
+
+# Distribución estimador de FH en Barrio 44
+```{r}
+data.frame(
+  Estimacion = Barrio_44
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_44
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.7
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_44),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 52357.,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH ingreso promedio en barrio 44"
+  )
+```
+
+
+# Distribución estimador de FH y HT en Barrio 44
+```{r}
+data.frame(
+  Estimacion = Barrio_44
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_44
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.6
+  )+
+  geom_density(
+    inherit.aes = FALSE,
+    aes(
+      x = Barrio_44_DIR
+    ),
+    fill = "orange",
+    colour = "orange",
+    alpha = 0.6,
+    data = data.frame(Barrio_44_DIR = Barrio_44_DIR)
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_44,na.rm = TRUE),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 52357,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH y HT ingreso promedio en barrio 44"
+  )
+```
+
+
+
+######################
+# SIMULACION BARRIO 8
+
+############################
+
+```{r}
+Barrio_8_DIR <- numeric()
+Barrio_8 <- numeric()
+
+for (i in 1:100) {
+  
+  set.seed(i)
+  
+  
+  Muestra <- BASE[
+    sample(nrow(BASE), size=1500),
+  ]%>%
+    mutate(
+      W = 17384/1500
+    )
+  
+  
+  Design <- as_survey_design(
+    Muestra,
+    w = W
+  )
+  
+  
+  Estimaciones_directas <- Design%>%
+    group_by(
+      barrio
+    )%>%
+    summarise(
+      Ingreso_Promedio = survey_mean(Ingreso,vartype = c("var"))
+    )%>%
+    left_join(
+      AUXILIARES%>%
+        rename(
+          Ingreso_Promedio_real = Ingreso_Promedio
+        ),
+      by = "barrio"
+    )
+  
+  attach(Estimaciones_directas)
+  
+  Estimaciones_SAE <- eblupFH(
+    Ingreso_Promedio ~ N_Ocupados + 
+      N_Jubilados + 
+      N_MIDES +
+      S_MIDES +
+      S_Asignaciones +
+      S_Leche_en_polvo,
+    vardir = Ingreso_Promedio_var
+  )
+  
+  TABLA_SAE <- data.frame(
+    Barrio = Estimaciones_directas$barrio,  
+    FH = Estimaciones_SAE$eblup)
+  
+  Barrio_8_DIR[i] <- Estimaciones_directas%>%filter(barrio == 8)%>%select(Ingreso_Promedio)%>%as.numeric()
+  Barrio_8[i] <- TABLA_SAE%>%filter(Barrio == 8)%>%select(FH)%>%as.numeric()
+  print(i)
+}
+```
+
+# Distribución estimador de FH en Barrio 8
+```{r}
+data.frame(
+  Estimacion = Barrio_8
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_8
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.7
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_8),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 75026,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH ingreso promedio en barrio 8"
+  )
+```
+
+
+# Distribución estimador de FH y HT en Barrio 8
+
+```{r}
+data.frame(
+  Estimacion = Barrio_8
+)%>%
+  ggplot(
+    aes(
+      x = Barrio_8
+    )
+  )+
+  geom_density(
+    fill = "gray",
+    colour = "gray",
+    alpha = 0.6
+  )+
+  geom_density(
+    inherit.aes = FALSE,
+    aes(
+      x = Barrio_8_DIR
+    ),
+    fill = "orange",
+    colour = "orange",
+    alpha = 0.6,
+    data = data.frame(Barrio_8_DIR = Barrio_8_DIR)
+  )+
+  geom_vline(
+    xintercept = mean(Barrio_8,na.rm = TRUE),
+    linetype = "dashed",
+    colour = "red",
+    size = 1.1
+  )+
+  geom_vline(
+    xintercept = 75026,
+    linetype = "dashed",
+    colour = "#0D592C",
+    size = 1.1
+  )+
+  labs(
+    title = "Distribución del estimador de FH y HT ingreso promedio en barrio 8"
+  )
+```
+

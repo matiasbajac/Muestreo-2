@@ -1,0 +1,428 @@
+---
+title: "Trabajo final"
+author: "Matías Bajac-Aris Sarkisian"
+date: "1-12-2023"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r, message=FALSE, warning=FALSE,echo=FALSE}
+library(tidyverse)
+library(readxl)
+library(srvyr)
+library(sampling)
+library(paletteer)
+library(tidymodels)
+library(survey)
+library(PracTools)
+library(ranger)
+```
+
+# Introducción
+
+El proposito de este proyecto es utilizar las herramientas vistas en el curso ,  y aplicarlas en una base de datos real ajena a las vistas en el curso. Estos datos refieren a hogares de Uruguay, que fueron seleccionados bajo un diseño muestral: aleatorio, estratificado, por conglomerados y en un etapa de selección.
+
+Lo que se intentará hacer es crear un sistema de ponderadores $w_i$ para todas las unidades elegibles respondentes de una muestra recogida, y aprtir de ellos generar estimaciones de los parametros deseados.
+
+```{r,echo=FALSE}
+muestra <- read_excel("muestra G5.xlsx")
+
+depto <- read_excel("proyecciones de población por dpto.xlsx")
+
+edadysexo <- read_excel("proyecciones de población por sexo y edades simples.xlsx")
+
+```
+
+
+# Parte A
+
+Se pide calcular estimaciones puntuales,junto con sus respectivas medidas de calidad, para tres parametros en específico, utilizando los ponderadores originales. Estos resultados se muestran en la siguiente tabla:
+
+```{r,echo=FALSE}
+muestra<-muestra %>% mutate(sexo=as.factor(sexo),estrato=as.factor(estrato),dpto=as.factor(dpto))
+design = muestra %>% as_survey_design(id=0,
+                                     weights=w0,
+                                     strata=estrato)
+```
+
+
+```{r,echo=FALSE}
+a<-design %>% filter(R==1) %>% summarise(survey_mean(ingreso, vartype = c("se","cv"), deff=TRUE))
+b<-design %>% filter(R==1) %>% summarise(survey_mean(pobreza, vartype = c("se","cv"), deff=TRUE))
+c<-design %>% filter(R==1) %>%   summarise(survey_ratio(desocupado,activo, vartype = c("se","cv"), deff=TRUE))
+d<-c("Ingreso promedio","Proporción pobres","Tasa desempleo")
+puntual<-as.data.frame(rbind(a,b,c))
+rownames(puntual)<-d
+round(puntual,4)
+```
+
+Para que sea correcto lo realizado, es necesario suponer que la no respuesta fue totalmente al azar, es decir, que no depende de ningúna variable. Haciendo este supuesto, quienés finalmente respondieron siguen siendo una muestra representativa de la población, y por lo tanto la no respuesta no induce sesgo.
+
+Para analizar la no respuesta, se presenta como primera aproximación,la tasa de respuesta a nivel global, sin incorporar ninguna información auxiliar de ningún tipo
+
+```{r,echo=TRUE}
+muestra  %>%  summarise(tr=mean(as.numeric(R)))
+```
+
+A continuación se analiza si la tasa de no respuesta puede depender de alguna variable auxiliar disponible. Las candidatas son: Sexo, departamento y Edad, está última agrupandose por tramos debido la falta de practicidad de trabajar con 99 valores. 
+
+```{r}
+muestra %>% group_by(sexo) %>% summarise(tr_we=weighted.mean(as.numeric(R),w0)) %>% ggplot(aes(x=tr_we,y=sexo,fill=sexo))+geom_col()+labs(x="No respuesta")
+```
+
+```{r}
+muestra<-muestra %>% mutate(PS_edad =cut(edad,breaks=c(0,14,20,25,30,40,50,60,Inf), right=FALSE))
+
+muestra %>% group_by(PS_edad) %>% summarise(tr_we=weighted.mean(as.numeric(R),w0)) %>% ggplot(aes(x=tr_we,y=PS_edad,fill=PS_edad))+geom_col()+labs(x="No respuesta")
+```
+
+
+```{r}
+muestra %>% group_by(dpto) %>% summarise(tr_we=weighted.mean(as.numeric(R),w0)) %>% ggplot(aes(x=tr_we,y=dpto,fill=dpto))+geom_col()+labs(x="No respuesta")
+```
+
+La tasa de respusta global es de aproximadamente 54%, y al anzalizar la relación con las variables  auxiliares, se puede ver que no hay tanta relación, dado que sin importar sexo,edad o departamento, la tasa de respuesta siempre está entre 50% y 60%. 
+
+# Parte B
+
+A partir de este punto, se asume que la no respuesta es MAR, que significa que su variabilidad puede ser explicada a partir de las variables auxiliares.
+
+A continuación, se intenta observar si los estratos pueden ser una buena variable explicativa para la no respuesta, y cómo quedarían los ponderadores ajustados por este factor
+ 
+ A su vez nos creamos g clases, en el cual cada individuo dentro de cada clase tiene igual probabilidad de responder
+ 
+ $$\phi_{i,g} = TR_w = \frac{\sum_{i\in R}w_i}{\sum_{i \in s}w_i}$$
+ 
+
+```{r}
+## segun estratos, se ve como dominios planeados 
+
+ajuste_nr_estrato=muestra  %>% group_by(estrato) %>% summarise(tr=mean(as.numeric(R)), tr_w=weighted.mean(as.numeric(R),w0))
+
+muestra=left_join(muestra,select(ajuste_nr_estrato, estrato, tr_w))
+
+m.estrato = muestra %>%  group_by(estrato) %>%  summarise(tr = round(mean(R),2), tr_w=round(weighted.mean(as.numeric(R),w0),2)) %>%  arrange(desc(tr_w))
+
+m.estrato
+```
+
+La tasa de respuesta no tiene una extrema variabilidad según estrato, y a su vez se puede apreciar tambien que tanto el ajuste por no respuesta como la propension teorica de no respuesta son similares entre si. Por consecuencia, parece razonable suponer que la propensión a responder no está fuertemente correlacionado con el estrato al que pertenece la unidad
+
+
+El modelo utilizado es el MAR, en el cual se utiliza info auxiliar para poder modelar la no respuesta, con estas covariables , nos construimos clases. 
+La idea es que la propensión a no responder  de cada clase sean distintas  entre si (iguales dentro de cada clase?), para buscar cuales grupos 
+son mas propensos a no responder. Se asume que los individuos dentro de cada estrto, tienen misma probabilidad de responder 
+
+```{r}
+muestra=muestra %>% mutate(w_nr_post=w0/tr_w)
+
+muestra=muestra %>% mutate(w_nr_post=w0/tr_w)
+deff_k = deffK(muestra %>%  filter(R==1) %>%  select(w_nr_post) %>% pull())
+deff_k
+```
+
+El deff_k indica que no hay problemas con la variabilidad de los nuevos ponderadores
+
+Computamos las estimaciones  usando los ponderadores por no respuesta de la manera
+$$w_{i}^{nr} = \frac{1}{\pi_i \phi_i}$$ y luego se comparan con los ponderadores originales.
+
+```{r}
+muestra %>%  ggplot() + geom_point(aes(x=w0,y=w_nr_post, color=estrato))
+```
+
+En el anterior grafico podemos observar como varian los ponderadores teoricos  y los ajustados por n-r. Podemos observar que el rango en w_0 varia entre 100 y 215 mientras que el ajustado el rango es mas amplio. Vemos que  el estratos con ingresos altos (Montevideo Alto con un  58 % )  tiene la  tasa de no respuesta mas grande mientras que el estrato 6 tiene la tasa de no respuesta mas chica con un 51%
+
+Con estos nuevos ponderadores, se vuelven a estimar mismos parametros que en la parte anterior
+```{r}
+design_2 = muestra %>% as_survey_design(id= 0,
+                                     weights=w_nr_post,
+                                     strata=estrato)
+
+a2<-design_2 %>% filter(R==1) %>% summarise(survey_mean(ingreso, vartype = c("se","cv"), deff=TRUE))
+b2<-design_2 %>% filter(R==1) %>% summarise(survey_mean(pobreza, vartype = c("se","cv"), deff=TRUE))
+c2<-design_2 %>% filter(R==1) %>% summarise(survey_ratio(desocupado,activo, vartype = c("se","cv"), deff=TRUE))
+puntual2<-as.data.frame(rbind(a2,b2,c2))
+rownames(puntual2)<-d
+round(puntual2,4)
+```
+Se puede ver que las estimaciones son bastante parecidas en general. Lo único que cambia de una manera significativa es la estimación puntual del ingreso promedio, pero en términos de desvío y relación con el muestreo aleatorio simple, los hallazgos son bastane parecidos.
+
+### Pregunta 4
+
+Para estimar las propensiones a responder, se elige utilizar el método de bosques aleatorios, entendiendo que es el algoritmo con mayor potencia para realizar las estimaciones. Se utilizan 100 árboles, y se utilizan estrato, sexo,edad y departamento como variables explicativas.
+
+```{r,echo=TRUE}
+muestra = muestra %>% mutate(R=factor(R))
+rf_model= parsnip::rand_forest( trees = 100) %>% 
+  set_engine('ranger') %>% 
+  set_mode('classification') %>% 
+  fit(R~estrato+edad+sexo+dpto, 
+               data=muestra)
+```
+
+Para evaluar su desempeo al predecir, se muestra la respectiva matriz de confusión, que compara la predicción con el valor real.
+
+```{r,echo=FALSE}
+pred_rf= tibble(predict(rf_model,muestra,type='prob') ,
+                   predict(rf_model,muestra) )
+
+conf_mat(data = bind_cols(select(muestra,R),select(pred_rf,.pred_class)), 
+         truth = R,
+         estimate = .pred_class)
+```
+
+La tasa de acierto en la predicción no es tan buena (alrededor del 64%),y tiende a predecir que el resultado va a ser respuesta por sobre no respuesta. De igual manera, era esperable encontrar algo así, debido a que al analizar la tasa de respuesta en función de cada variable explicativa en la parte anterior, se había encontrado que en todos los subgrupos hubo una tasa de respuesta mayor al 50%, por lo que es entendible que el algoritmo tienda a predecir que el individuo va a responder.De igual manera, es importante aclarar que este algoritmo fue el que tuvo mayor tasa de acierto entre todos los evaluados. 
+
+```{r,echo=FALSE}
+pred_rf = pred_rf %>% rename(prop_rf=.pred_1)
+muestra = muestra %>% bind_cols(select(pred_rf,prop_rf))
+```
+
+```{r,echo=FALSE}
+muestra %>% ggplot(aes(x=prop_rf)) +geom_histogram(bins=40,fill='green', color='white', alpha=0.6)+
+  theme_bw()
+```
+
+Como se había propuesto,la distribución de las propensiones se encuentra inclinada hacia el lado positivo, conllevando mayores predicciones de respuesta en detrimento de la no respuesta.
+
+Al calcularle el efecto de Kish a los ponderadores ajustados, el resultado da menor a 1.5.
+
+```{r,echo=FALSE}
+muestra = muestra %>% mutate(w_nr_rf=ifelse(R==1,  w0/prop_rf,0))
+deff_k = deffK(muestra %>%  filter(R==1) %>%  select(w_nr_rf) %>% pull())
+deff_k
+```
+
+Nuevamente se comparan los nuevos ponderadores calculados con los ponderadores originales
+
+```{r,echo=FALSE}
+
+muestra %>% filter(R==1) %>% ggplot(aes(x=w0,y=w_nr_rf))+geom_point()
+```
+
+Se puede observar que ponderadores en principio iguales ahora tienen una distancia significativa entre ellos. Una pregunta que se puede plantear es si esto impactará en gran medida a las nuevas estimaciones  de los parametros en cuestión 
+
+```{r}
+design3<-muestra %>% filter(R==1) %>% as_survey_design(id=0, 
+                                        strata=estrato,
+                                        weights=w_nr_rf)
+
+a3<-design3 %>% summarise(survey_mean(ingreso, vartype = c('se','cv'),deff=TRUE))
+
+b3<-design3 %>% filter(R==1) %>% summarise(survey_mean(pobreza, vartype = c("se","cv"), deff=TRUE))
+
+c3<-design3 %>% filter(R==1) %>% summarise(survey_ratio(desocupado,activo, vartype = c("se","cv"), deff=TRUE))
+puntual3<-as.data.frame(rbind(a3,b3,c3))
+rownames(puntual3)<-d
+round(puntual3,4)
+```
+
+Las nuevas estimaciones están proximas a las realizadas en las partes anteriores, no se percibe evidencia clara de que el procedimineto realizado fue fructífero.
+
+### Pregunta 6
+
+Se utilizan las $\hat{\phi_i}$ del random forest  para crear clases de no respuesta y  luego se le aplica un factor de ajuste comun, el cual en este caso es computado utilizando la mediana. En función de la estructura de los datos,se elige trabajar con quintiles
+
+```{r,echo=FALSE}
+
+
+ class_q= quantile(muestra$prop_rf,    seq(0,1,by=.20))
+ 
+                        
+   post = muestra %>%
+  mutate(clase_rf = ifelse(prop_rf <= class_q[1], 1,
+                    ifelse(prop_rf <= class_q[2], 2,
+                    ifelse(prop_rf <= class_q[3], 3, 
+                    ifelse(prop_rf <= class_q[4], 4, 5) 
+                     ) 
+                       ) 
+                          )
+                            )
+             
+
+
+clases_prop =post %>%  group_by(clase_rf) %>%  summarise( mediana  = median(prop_rf))
+
+
+muestra_p  = post %>%  mutate(prop_clase_rf = ifelse(clase_rf == 1, clases_prop$mediana[1],
+                                             ifelse(clase_rf == 2, clases_prop$mediana[2],
+                                                    ifelse(clase_rf == 3, clases_prop$mediana[3],
+                                                           ifelse(clase_rf==4, clases_prop$mediana[4],
+                                                                ifelse(clase_rf==5, clases_prop$mediana[5], 
+                                                                       ""))))))
+muestra_p<-muestra_p %>%  mutate(prop_clase_rf = as.numeric(prop_clase_rf), w_post_nr_rf= w0/prop_clase_rf) 
+
+muestra_p2<-muestra_p %>% group_by(clase_rf) %>% summarise(total=n())
+
+quintiles<-data.frame("Clase"=c("(0.0195,0.4690]","(0.4690,0.5198]","(0.5198,0.5631]","(0.5631,0.6109]","(0.6109,0.9126]"))
+muestra_p2 %>% cbind(quintiles)
+```
+
+```{r}
+
+deff_k = deffK(muestra_p %>%  filter(R==1) %>%  select(w_post_nr_rf) %>% pull())
+deff_k
+```
+Aquí no hay problemas con el efecto Kish. Por lo tanto, se pasa a las estimaciones
+
+```{r}
+design4<-muestra_p %>% filter(R==1) %>% as_survey_design(id=0, 
+                                        strata=estrato,
+                                        weights=w_post_nr_rf)
+
+a4<-design4 %>% summarise(survey_mean(ingreso, vartype = c('se','cv'),deff=TRUE))
+
+b4<-design4 %>% filter(R==1) %>% summarise(survey_mean(pobreza, vartype = c("se","cv"), deff=TRUE))
+
+c4<-design4 %>% filter(R==1) %>% summarise(survey_ratio(desocupado,activo, vartype = c("se","cv"), deff=TRUE))
+puntual4<-as.data.frame(rbind(a4,b4,c4))
+rownames(puntual4)<-d
+round(puntual4,4)
+```
+
+Sellega a resultados parecidos
+
+# Ejercicio 3
+
+EN esta parte el objetivo es calibrar los ponderadores anteriores, para que se ajusten a las predicciones poblacionales según edad, sexo y departamento
+
+```{r,echo=TRUE}
+sum(depto$personas)-(sum(edadysexo$hombres)+sum(edadysexo$mujeres))
+```
+
+En primer lugar, hay que arreglar la diferencia en el total poblacional estimado entre las diferentes bases de datos, La diferencia es que la base  de departamente cuenta en total 5 personas mas que la base de edad y sexo. Por lo tanto, se decide agregar 5 personas a la base de edad y sexo, en un lugar aleatorio
+
+```{r,echo=TRUE}
+set.seed(4)
+i<-sample(nrow(edadysexo),1)
+j<-sample(c(2,3),1)
+edadysexo[i,j]<-edadysexo[i,j]+5
+```
+
+Ya resuelto esto, se procede a presentar los totales poblaciones de la manera requerida por la función calibrate
+
+```{r,warning=FALSE,echo=FALSE}
+pop_edad = edadysexo %>% mutate(PS_edad=cut(edad,breaks=c(0,14,20,25,30,40,50,60,Inf), right=FALSE)) %>% group_by(PS_edad)%>% summarise(total=hombres+mujeres) %>% group_by(PS_edad) %>% summarise(n=sum(total))
+pop_dpto<-depto %>% mutate(n=personas)
+pop_sexo<-data.frame("Sexo"=c("Hombre","Mujer"),"n"=c(sum(edadysexo$hombres),sum(edadysexo$mujeres)))
+```
+
+```{r,echo=FALSE}
+CONTEOS<-c(sum(edadysexo$hombres)+sum(edadysexo$mujeres),pop_dpto$n[-1],pop_sexo$n[-1],pop_edad$n[-1])
+```
+
+```{r,echo=FALSE}
+p=svydesign(id=~0,       #NO CLUSTER
+             strata=~estrato, #NO ESTRATOS      #TASA DE MUESTREO
+             weights=~w_nr_post,  #PONDERADORES BASE
+             data=muestra)
+r=calibrate(design=p,
+              formula=~dpto+sexo+PS_edad,
+              population=CONTEOS,
+              calfun="raking")
+
+aux = tibble(w_raking=weights(r))%>% mutate(bw=weights(p), g=w_raking/bw)
+ggplot(aux,aes(x=g))+geom_histogram(fill="green",color="black")
+ggplot(aux,aes(x=w_raking))+geom_histogram(fill="green",color="black")
+
+```
+
+No se detectan poneradores negativos, y hay un par que pueden ser considerados muy altos,pero tampoco se considera que sea algo inaceptable, por lo que se aceptan y se sigue adelante
+
+```{r,echo=FALSE}
+muestra<-cbind(muestra,aux[,1],aux[,3])
+```
+
+## Ejercico 4
+
+Habiendo obtenido los ponderadores calibrados y ponderados por la no respuesta, se vuelven a calcular los parametros.
+
+```{r,echo=FALSE}
+design4 = muestra   %>%  filter(R==1) %>%  as_survey_design(id=0,
+                                     weights=w_raking,
+                                     strata=estrato)
+
+
+a5<-design4  %>% summarise(survey_mean(ingreso, vartype = c("se","cv"), deff=TRUE))
+b5<-design4 %>% summarise(survey_mean(pobreza, vartype = c("se","cv"), deff=TRUE))
+c5<-design4  %>%  filter(activo == 1) %>%  summarise(survey_ratio(desocupado,pet, vartype = c("se","cv"), deff=TRUE))
+
+puntual5<-as.data.frame(rbind(a5,b5,c5))
+rownames(puntual5)<-d
+round(puntual5,4)
+```
+
+Y se agrega la determinación para cada departamento, además del intervalo de confianza para cada uno.
+
+### Proporción de personas pobres:
+```{r,echo=FALSE}
+prop_pobres_dpto = design4 %>%  group_by(dpto) %>%   summarise(survey_mean(pobreza, vartype = c("se","cv","ci"), deff=FALSE)) 
+pobres_total<-cbind(dpto="Total",as.data.frame(design4  %>% summarise(survey_mean(pobreza, vartype = c("se","cv","ci"), deff=FALSE))))
+pobres = rbind(prop_pobres_dpto,pobres_total)
+pobres
+```
+
+### Ingreso promedio
+Para las personas empleadas mayores de 25 años
+
+```{r}
+prom_ingreso_dpto = design4 %>%  filter(edad>25,ocupado==1 )%>% group_by(dpto) %>%   summarise(survey_mean(ingreso, vartype = c("se","cv","ci"), deff=FALSE))
+ingreso_total<-cbind(dpto="Total",as.data.frame(design4  %>% filter(edad>25,ocupado==1) %>% summarise(survey_mean(ingreso, vartype = c("se","cv","ci"), deff=FALSE))))
+ingreso = rbind(prom_ingreso_dpto,ingreso_total)
+ingreso
+```
+
+### Tasa de desempleo:
+```{r}
+tasa_desempleo_dpto = design4 %>%  group_by(dpto)  %>%  summarise(survey_ratio(desocupado, activo,vartype = c("se","cv","ci"), deff=FALSE))
+desempleo_total<-cbind(dpto="Total",as.data.frame(design4 %>% summarise(survey_ratio(desocupado,activo, vartype = c("se","cv","ci"), deff=FALSE))))
+desempleo = rbind(tasa_desempleo_dpto,desempleo_total)
+desempleo
+```
+
+Todos estos cálculos se obtienen estimando la varianza por el método del último conglomerado, que es el predeterminado del program.
+
+Para comparar, se plantea también cómo quedarían esas varianzas si fueran estimamadas por el método Boostrap Rao-Wu
+
+```{r,echo=TRUE}
+boot=    design4 %>%  as.svrepdesign(design=., type='subbootstrap', replicates=1000)
+```
+
+### Tasa de desempleo 
+```{r,echo=FALSE}
+te_boot<-svyratio(~desocupado, ~activo,boot,return.replicates=TRUE)
+prop_des_dep_boot = svyby(~desocupado,denominator=~activo,by=~dpto,boot,FUN = svyratio)
+desempleo_total2<-cbind(dpto = "Total","desocupado/activo" = as.numeric(te_boot[1]),"se.desocupado/activo" = as.numeric(te_boot[3])^0.5)
+rbind(prop_des_dep_boot,desempleo_total2) %>% cbind(desempleo[,2:3])
+```
+
+Las varianzas estimadas son muy parecidas a las conseguidas con el método del último conglomerado
+
+### Pobreza
+```{r,echo=FALSE}
+pb_boot<-svymean(~pobreza, boot,return.replicates=TRUE)
+prop_pob_dep_boot = svyby(~pobreza, by= ~dpto, boot,  FUN = svymean)
+pobreza_total2<-as.data.frame(cbind(dpto = "Total","pobreza" = as.numeric(pb_boot[1]$mean[1]),se = as.data.frame(pb_boot)[2]))
+rbind(prop_pob_dep_boot,c("Total",0.08656063,0.002475025)) %>% cbind(pobres[,2:3])
+```
+
+También se llega a desvios similares
+
+### Ingreso Promedio
+```{r,echo=FALSE}
+bootingreso = design4 %>% filter(edad>25,ocupado==1 ) %>%  as.svrepdesign(design=., type='subbootstrap', replicates=1000)
+
+ip_boot<-svymean(~ingreso,bootingreso,return.replicates = TRUE)
+prop_ing_dep_boot = svyby(~ingreso,by=~dpto,bootingreso,FUN = svymean)
+ingreso_total2<-as.data.frame(cbind(dpto = "Total","ingreso" = as.numeric(ip_boot[1]$mean[1]),se = as.data.frame(ip_boot)[2]))
+rbind(prop_ing_dep_boot,c("Total",38412.47,420.2542)) %>% cbind(ingreso[,2:3])
+```
+
+En este caso si difieren un poco más lo desvios aparentemente. Aunque es posible que ahora sea más evidente debido a la mayor magnitud de los valores,cuando en realidad antes diferían en la misma proporción
+

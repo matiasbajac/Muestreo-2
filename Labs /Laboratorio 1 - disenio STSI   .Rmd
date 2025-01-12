@@ -1,0 +1,185 @@
+---
+title: "Untitled"
+author: "Matias Bajac"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+frame_empresas <- read_excel("Datos/frame empresas.xlsx")
+
+head(frame_empresas)
+```
+```{r}
+library(tidyverse)
+library(sampling)
+library(survey)
+
+install.packages("srvyr")
+
+library(srvyr)
+
+```
+1) U = Empresas de uruguay , con 20 empleados o + 
+ variable de estratificacion es la cantidad de empleados de la empresa 
+ x = empleados 
+ y = remuneraciones
+ 
+ 
+
+```{r}
+
+frame_empresas %>%  count(actividad)
+ tamanio = nrow(frame_empresas) 
+ 
+ pop_tot = frame_empresas %>%  summarise( n = n(), x = sum(rem), y = sum(empleados)) 
+ 
+ 
+ ## ver si hay relacion   entre empleados y remuneraciones para poder estratificar 
+ 
+ frame_empresas %>%  ggplot() + geom_point(aes(x=empleados,y=rem), color = 'blue') + geom_smooth(aes(x=empleados, y = rem), method = 'lm')
+ 
+ frame_empresas %>%  summarise(cor(rem,empleados))
+ 
+ 
+
+
+```
+**estratificacion**
+
+1- 20 - 249
+
+2- 50 - 299
+
+3 
+
+
+
+```{r}
+frame = frame_empresas %>%  mutate(estrato = cut(empleados, breaks=c(20,50,100,200,500,Inf), right = FALSE))
+
+## tengo n = 100 y la estrategia de asignacion es la optima con una variable auxiliar x = empleados
+n = 100
+tam = frame  %>%  group_by(estrato) %>%  summarise( Nh = n(), sd_h= sd(empleados), total_emp = sum(empleados), sd_emp=sd(empleados)) %>%  mutate( nh  = round(n*Nh*sd_h/sum(Nh*sd_h)), nh_opt= n*Nh*sd_emp/sum(Nh*sd_emp)) # computamos medidas de resumen, tamanio de estrato, desviacion de empleados, nh optima
+
+##nh  crea el tamanio de muestra proporcional 
+
+## calculamos los ponderadores originales basados en el disenio 
+
+
+tam = tam %>%    mutate(w = Nh/nh) $w_i$ = 1/phi = Nh/nh
+## crea el tamanio de muestra proporcional 
+
+## la asginacion optima para los tamanios chicos no funciona 
+
+
+
+
+
+```
+
+
+
+Ordenar el marco por la variable estrato 
+
+```{r}
+frame = frame %>%  arrange(estrato) 
+
+
+
+
+```
+
+
+2) fijamos semillas 
+
+
+3) seleccionamos la muestra usando la libreria sampling, funcion strata
+
+```{r}
+set.seed(1)
+
+muestra = sampling::strata(frame,stratanames = 'estrato',size= tam$nh,method= 'srswor',description = TRUE)
+
+# strata devuelve los estratos y las proba de inclusion = nh/Nh= fh
+
+
+
+
+
+
+```
+
+
+
+4) para agregarle las variables del marco uso *getdata*
+
+
+```{r}
+muestra = sampling::getdata(frame,muestra)
+glimpse(muestra)
+```
+5) en la muestra guardaremos:
+a) ponderadores 
+b) info del disenio, aca guardamos los estratos y la tasa de muestreo, tambien vemos si el muestreo es directo o indirecto.
+
+En este caso estramos ante un muestreo de seleccion directo
+
+
+```{r}
+muestra = muestra %>%  mutate(w = 1/Prob)
+```
+6) Usamos svydisgn
+
+hay dos formas de darle el fpc
+a) diciendo cuanto es el tamanio del estrato. 
+b) la tasa de muestreo
+
+```{r}
+ps = svydesign(ids= ~0, strata = ~estrato, weights= ~w,fpc=~Prob,data=muestra)
+```
+Calculo el total de las remuneraciones
+```{r}
+svytotal(~rem,ps)
+```
+
+ 
+Se puede usar (preferiblemente)  la liberria svyr
+
+```{r}
+ps1=  muestra %>% as_survey_design(id= 0, strata=estrato,weights=w,fpc=Prob)
+
+# tiene la info del disenio muestral 
+
+
+```
+
+
+ estimacion total rem 
+ 
+```{r}
+ps1 %>%  summarise(survey_total(rem, vartype = c("cv","ci"), deff=TRUE))
+```
+ hacer congl es mas complejo que hacer un simple en dos etapas, pero es mejor en eficiencia. 
+ 
+ 
+ 7) Estimar rl total de rem segmentado por actividad
+ 
+```{r}
+ps1 %>%  group_by(actividad) %>%   summarise(survey_total(rem, vartype = c("cv","ci"), deff=TRUE))
+# cv con mayores a .25 son "una porqueria"
+
+ps1 %>%  group_by(actividad) %>%   summarise(total_rem=survey_total(rem), N_est=survey_total(1)) %>%  full_join(frame %>%  count(actividad) %>%  rename(N=n))
+
+
+
+```
+
+ 7.b) lo mismo pero hacer por estrato 
+ 
+ 
+
