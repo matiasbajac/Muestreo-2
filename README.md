@@ -2,5 +2,5 @@
 
 # Licenciatura en Estadística
 
-IESTA - UDELAR Responsabe del curso: juan Pablo Ferreira
+IESTA - UDELAR Responsabe del curso: Juan Pablo Ferreira
 
